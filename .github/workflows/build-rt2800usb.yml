@@ -52,56 +52,29 @@ jobs:
       - name: Prepare kernel config
         run: |
           cd ~/linux-source
-
-          # Start with a minimal x86_64 config that matches Edison
           make defconfig
-
-          # Apply Edison-specific config fragments
           CFG_DIR="$GITHUB_WORKSPACE/meta-intel-edison-bsp/recipes-kernel/linux/files"
-
-          # Collect all .cfg fragments
           for cfg in "$CFG_DIR"/*.cfg; do
             echo "Applying $(basename $cfg)..."
             cat "$cfg" >> .config
           done
-
-          # Enable rt2800usb and dependencies
-          cat >> .config << 'EOF'
-CONFIG_WLAN=y
-CONFIG_CFG80211=y
-CONFIG_MAC80211=y
-CONFIG_RT2X00=m
-CONFIG_RT2X00_LIB=m
-CONFIG_RT2X00_LIB_CRYPTO=y
-CONFIG_RT2X00_USB=m
-CONFIG_RT2800_LIB=m
-CONFIG_RT2800_LIB_MMIO=m
-CONFIG_RT2800USB=m
-CONFIG_RT2800USB_RT33XX=y
-CONFIG_RT2800USB_RT35XX=y
-CONFIG_RT2800USB_RT3573=y
-CONFIG_RT2800USB_RT53XX=y
-CONFIG_RT2800USB_RT55XX=y
-CONFIG_RT2800USB_UNKNOWN=y
-EOF
-
-          # Fix config (resolve dependencies automatically)
+          cat "$GITHUB_WORKSPACE/meta-intel-edison-bsp/recipes-kernel/linux/files/rt2800usb.cfg" >> .config
+          # Ensure wireless core subsystem is enabled
+          echo "CONFIG_WLAN=y" >> .config
+          echo "CONFIG_CFG80211=y" >> .config
+          echo "CONFIG_MAC80211=y" >> .config
           make olddefconfig
-
-          # Verify critical options
           echo "=== Verifying config ==="
-          grep -E 'CONFIG_(RT2800USB|RT2X00|CFG80211|MAC80211)=' .config || true
           grep -E 'CONFIG_(RT2800USB|RT2X00)' .config
 
       - name: Apply Edison kernel patches
         run: |
           cd ~/linux-source
           PATCH_DIR="$GITHUB_WORKSPACE/meta-intel-edison-bsp/recipes-kernel/linux/files"
-
           for patch in "$PATCH_DIR"/*.patch; do
             if [ -f "$patch" ]; then
               echo "Applying $(basename $patch)..."
-              git apply --reject --whitespace=fix "$patch" || echo "WARNING: $(basename $patch) failed to apply, continuing..."
+              git apply --reject --whitespace=fix "$patch" 2>&1 || echo "WARNING: $(basename $patch) failed to apply, continuing..."
             fi
           done
 
@@ -121,53 +94,37 @@ EOF
           cd ~/linux-source
           echo "=== Built .ko files ==="
           find drivers/net/wireless/ralink -name '*.ko' -ls
-
           echo "=== Module info ==="
-          for ko in $(find drivers/net/wireless/ralink -name '*.ko'); do
-            echo "--- $ko ---"
-            modinfo "$ko"
-          done
-
-          # Verify vermagic
-          echo "=== Vermagic check ==="
-          find drivers/net/wireless/ralink -name 'rt2800usb.ko' -exec modinfo {} \; | grep vermagic
+          find drivers/net/wireless/ralink -name 'rt2800usb.ko' -exec modinfo {} \;
 
       - name: Package modules
         run: |
           mkdir -p output/modules
           cd ~/linux-source
           find drivers/net/wireless/ralink -name '*.ko' -exec cp {} $GITHUB_WORKSPACE/output/modules/ \;
-
-          # Create install script
-          cat > $GITHUB_WORKSPACE/output/install_on_edison.sh << 'SCRIPT'
-          #!/bin/bash
-          # Install rt2800usb modules on Intel Edison
-          # Run as root: bash install_on_edison.sh
-
-          KVER="6.12.3-edison-acpi-preempt-rt"
-          MODDIR="/lib/modules/$KVER/kernel/drivers/net/wireless/ralink/rt2x00"
-
-          echo "Creating module directory..."
-          mkdir -p "$MODDIR"
-
-          echo "Copying modules..."
-          cp -v rt2x00lib.ko rt2x00usb.ko rt2800lib.ko rt2800usb.ko "$MODDIR/"
-
-          echo "Updating module dependencies..."
-          depmod -a "$KVER"
-
-          echo "Loading modules..."
-          modprobe rt2800usb
-
-          echo "Verifying..."
-          lsmod | grep rt2x00
-          ip link show wlan1 2>/dev/null && echo "SUCCESS: wlan1 interface created!" || echo "Check dmesg for errors"
-          SCRIPT
-          chmod +x $GITHUB_WORKSPACE/output/install_on_edison.sh
-
-          echo "=== Package contents ==="
           ls -la $GITHUB_WORKSPACE/output/modules/
-          ls -la $GITHUB_WORKSPACE/output/
+
+      - name: Create install script
+        run: |
+          OUTDIR="$GITHUB_WORKSPACE/output"
+          printf '#!/bin/bash\n' > "$OUTDIR/install_on_edison.sh"
+          printf '# Install rt2800usb modules on Intel Edison\n' >> "$OUTDIR/install_on_edison.sh"
+          printf '# Usage: scp modules/* and this script to Edison, then: bash install_on_edison.sh\n\n' >> "$OUTDIR/install_on_edison.sh"
+          printf 'KVER="6.12.3-edison-acpi-preempt-rt"\n' >> "$OUTDIR/install_on_edison.sh"
+          printf 'SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"\n' >> "$OUTDIR/install_on_edison.sh"
+          printf 'MODDIR="/lib/modules/$KVER/extra"\n\n' >> "$OUTDIR/install_on_edison.sh"
+          printf 'echo "Creating module directory..."\n' >> "$OUTDIR/install_on_edison.sh"
+          printf 'mkdir -p "$MODDIR"\n\n' >> "$OUTDIR/install_on_edison.sh"
+          printf 'echo "Copying modules..."\n' >> "$OUTDIR/install_on_edison.sh"
+          printf 'cp -v "$SCRIPT_DIR/modules/"*.ko "$MODDIR/"\n\n' >> "$OUTDIR/install_on_edison.sh"
+          printf 'echo "Updating module dependencies..."\n' >> "$OUTDIR/install_on_edison.sh"
+          printf 'depmod -a "$KVER"\n\n' >> "$OUTDIR/install_on_edison.sh"
+          printf 'echo "Loading modules..."\n' >> "$OUTDIR/install_on_edison.sh"
+          printf 'modprobe rt2800usb\n\n' >> "$OUTDIR/install_on_edison.sh"
+          printf 'echo "Verifying..."\n' >> "$OUTDIR/install_on_edison.sh"
+          printf 'lsmod | grep rt2x00\n' >> "$OUTDIR/install_on_edison.sh"
+          printf 'ip link show wlan1 2>/dev/null && echo "SUCCESS: wlan1 interface created!" || echo "Check dmesg for errors"\n' >> "$OUTDIR/install_on_edison.sh"
+          chmod +x "$OUTDIR/install_on_edison.sh"
 
       - name: Upload modules artifact
         uses: actions/upload-artifact@v4
