@@ -1,0 +1,177 @@
+name: Build rt2800usb module for Edison
+
+on:
+  push:
+    branches: [build/rt2800usb]
+    paths:
+      - '.github/workflows/build-rt2800usb.yml'
+      - 'meta-intel-edison-bsp/recipes-kernel/linux/files/**'
+  workflow_dispatch:
+    inputs:
+      kernel_version:
+        description: 'Kernel version tag'
+        required: false
+        default: 'v6.12.3'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout meta-intel-edison
+        uses: actions/checkout@v4
+
+      - name: Set variables
+        id: vars
+        run: |
+          KERNEL_VERSION="${{ github.event.inputs.kernel_version || 'v6.12.3' }}"
+          echo "kernel_version=$KERNEL_VERSION" >> $GITHUB_OUTPUT
+          echo "Building for kernel: $KERNEL_VERSION"
+
+      - name: Cache linux source
+        uses: actions/cache@v4
+        id: cache-linux
+        with:
+          path: ~/linux-source
+          key: linux-${{ steps.vars.outputs.kernel_version }}
+
+      - name: Clone Linux kernel source
+        if: steps.cache-linux.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth 1 --branch ${{ steps.vars.outputs.kernel_version }} \
+            https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git \
+            ~/linux-source
+
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y flex bison libelf-dev libssl-dev
+
+      - name: Prepare kernel config
+        run: |
+          cd ~/linux-source
+
+          # Start with a minimal x86_64 config that matches Edison
+          make defconfig
+
+          # Apply Edison-specific config fragments
+          CFG_DIR="$GITHUB_WORKSPACE/meta-intel-edison-bsp/recipes-kernel/linux/files"
+
+          # Collect all .cfg fragments
+          for cfg in "$CFG_DIR"/*.cfg; do
+            echo "Applying $(basename $cfg)..."
+            cat "$cfg" >> .config
+          done
+
+          # Enable rt2800usb and dependencies
+          cat >> .config << 'EOF'
+CONFIG_WLAN=y
+CONFIG_CFG80211=y
+CONFIG_MAC80211=y
+CONFIG_RT2X00=m
+CONFIG_RT2X00_LIB=m
+CONFIG_RT2X00_LIB_CRYPTO=y
+CONFIG_RT2X00_USB=m
+CONFIG_RT2800_LIB=m
+CONFIG_RT2800_LIB_MMIO=m
+CONFIG_RT2800USB=m
+CONFIG_RT2800USB_RT33XX=y
+CONFIG_RT2800USB_RT35XX=y
+CONFIG_RT2800USB_RT3573=y
+CONFIG_RT2800USB_RT53XX=y
+CONFIG_RT2800USB_RT55XX=y
+CONFIG_RT2800USB_UNKNOWN=y
+EOF
+
+          # Fix config (resolve dependencies automatically)
+          make olddefconfig
+
+          # Verify critical options
+          echo "=== Verifying config ==="
+          grep -E 'CONFIG_(RT2800USB|RT2X00|CFG80211|MAC80211)=' .config || true
+          grep -E 'CONFIG_(RT2800USB|RT2X00)' .config
+
+      - name: Apply Edison kernel patches
+        run: |
+          cd ~/linux-source
+          PATCH_DIR="$GITHUB_WORKSPACE/meta-intel-edison-bsp/recipes-kernel/linux/files"
+
+          for patch in "$PATCH_DIR"/*.patch; do
+            if [ -f "$patch" ]; then
+              echo "Applying $(basename $patch)..."
+              git apply --reject --whitespace=fix "$patch" || echo "WARNING: $(basename $patch) failed to apply, continuing..."
+            fi
+          done
+
+      - name: Prepare kernel build
+        run: |
+          cd ~/linux-source
+          make prepare
+          make modules_prepare
+
+      - name: Build rt2800usb modules
+        run: |
+          cd ~/linux-source
+          make M=drivers/net/wireless/ralink/rt2x00 modules -j$(nproc)
+
+      - name: Verify built modules
+        run: |
+          cd ~/linux-source
+          echo "=== Built .ko files ==="
+          find drivers/net/wireless/ralink -name '*.ko' -ls
+
+          echo "=== Module info ==="
+          for ko in $(find drivers/net/wireless/ralink -name '*.ko'); do
+            echo "--- $ko ---"
+            modinfo "$ko"
+          done
+
+          # Verify vermagic
+          echo "=== Vermagic check ==="
+          find drivers/net/wireless/ralink -name 'rt2800usb.ko' -exec modinfo {} \; | grep vermagic
+
+      - name: Package modules
+        run: |
+          mkdir -p output/modules
+          cd ~/linux-source
+          find drivers/net/wireless/ralink -name '*.ko' -exec cp {} $GITHUB_WORKSPACE/output/modules/ \;
+
+          # Create install script
+          cat > $GITHUB_WORKSPACE/output/install_on_edison.sh << 'SCRIPT'
+          #!/bin/bash
+          # Install rt2800usb modules on Intel Edison
+          # Run as root: bash install_on_edison.sh
+
+          KVER="6.12.3-edison-acpi-preempt-rt"
+          MODDIR="/lib/modules/$KVER/kernel/drivers/net/wireless/ralink/rt2x00"
+
+          echo "Creating module directory..."
+          mkdir -p "$MODDIR"
+
+          echo "Copying modules..."
+          cp -v rt2x00lib.ko rt2x00usb.ko rt2800lib.ko rt2800usb.ko "$MODDIR/"
+
+          echo "Updating module dependencies..."
+          depmod -a "$KVER"
+
+          echo "Loading modules..."
+          modprobe rt2800usb
+
+          echo "Verifying..."
+          lsmod | grep rt2x00
+          ip link show wlan1 2>/dev/null && echo "SUCCESS: wlan1 interface created!" || echo "Check dmesg for errors"
+          SCRIPT
+          chmod +x $GITHUB_WORKSPACE/output/install_on_edison.sh
+
+          echo "=== Package contents ==="
+          ls -la $GITHUB_WORKSPACE/output/modules/
+          ls -la $GITHUB_WORKSPACE/output/
+
+      - name: Upload modules artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: rt2800usb-modules-${{ steps.vars.outputs.kernel_version }}
+          path: output/
+          retention-days: 30
