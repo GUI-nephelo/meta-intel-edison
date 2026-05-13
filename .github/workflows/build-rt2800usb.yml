@@ -37,7 +37,7 @@ jobs:
         id: cache-linux
         with:
           path: ~/linux-source
-          key: linux-${{ steps.vars.outputs.kernel_version }}
+          key: linux-${{ steps.vars.outputs.kernel_version }}-v2
 
       - name: Clone Linux kernel source
         if: steps.cache-linux.outputs.cache-hit != 'true'
@@ -52,49 +52,57 @@ jobs:
       - name: Prepare kernel config
         run: |
           cd ~/linux-source
-          make defconfig
-          CFG_DIR="$GITHUB_WORKSPACE/meta-intel-edison-bsp/recipes-kernel/linux/files"
-          for cfg in "$CFG_DIR"/*.cfg; do
-            echo "Applying $(basename $cfg)..."
-            cat "$cfg" >> .config
-          done
-          cat "$GITHUB_WORKSPACE/meta-intel-edison-bsp/recipes-kernel/linux/files/rt2800usb.cfg" >> .config
-          # Ensure wireless core subsystem is enabled
-          echo "CONFIG_WLAN=y" >> .config
-          echo "CONFIG_CFG80211=y" >> .config
-          echo "CONFIG_MAC80211=y" >> .config
+          # Start with allnoconfig then enable what we need
+          make allnoconfig
+          # Enable essential x86_64 options
+          scripts/config --enable CONFIG_64BIT
+          scripts/config --enable CONFIG_SMP
+          scripts/config --enable CONFIG_MODULES
+          scripts/config --enable CONFIG_MODULE_UNLOAD
+          scripts/config --enable CONFIG_PREEMPT_RT
+          scripts/config --enable CONFIG_USB
+          scripts/config --enable CONFIG_USB_SUPPORT
+          scripts/config --enable CONFIG_NET
+          scripts/config --enable CONFIG_INET
+          scripts/config --enable CONFIG_WIRELESS
+          scripts/config --enable CONFIG_WLAN
+          scripts/config --enable CONFIG_CFG80211
+          scripts/config --enable CONFIG_MAC80211
+          # Enable rt2800usb driver chain
+          scripts/config --module CONFIG_RT2X00
+          scripts/config --module CONFIG_RT2X00_LIB
+          scripts/config --enable CONFIG_RT2X00_LIB_CRYPTO
+          scripts/config --module CONFIG_RT2X00_USB
+          scripts/config --module CONFIG_RT2800_LIB
+          scripts/config --enable CONFIG_RT2800_LIB_MMIO
+          scripts/config --module CONFIG_RT2800USB
+          scripts/config --enable CONFIG_RT2800USB_RT33XX
+          scripts/config --enable CONFIG_RT2800USB_RT35XX
+          scripts/config --enable CONFIG_RT2800USB_RT3573
+          scripts/config --enable CONFIG_RT2800USB_RT53XX
+          scripts/config --enable CONFIG_RT2800USB_RT55XX
+          scripts/config --enable CONFIG_RT2800USB_UNKNOWN
+          # Set local version to match Edison
+          scripts/config --set-str CONFIG_LOCALVERSION "-edison-acpi-preempt-rt"
+          # Resolve all dependencies
           make olddefconfig
           echo "=== Verifying config ==="
-          grep -E 'CONFIG_(RT2800USB|RT2X00)' .config
+          grep -E 'CONFIG_(RT2800USB|RT2X00|CFG80211|MAC80211|USB|MODULES)=' .config
 
-      - name: Apply Edison kernel patches
+      - name: Build kernel and modules
         run: |
           cd ~/linux-source
-          PATCH_DIR="$GITHUB_WORKSPACE/meta-intel-edison-bsp/recipes-kernel/linux/files"
-          for patch in "$PATCH_DIR"/*.patch; do
-            if [ -f "$patch" ]; then
-              echo "Applying $(basename $patch)..."
-              git apply --reject --whitespace=fix "$patch" 2>&1 || echo "WARNING: $(basename $patch) failed to apply, continuing..."
-            fi
-          done
-
-      - name: Prepare kernel build
-        run: |
-          cd ~/linux-source
-          make prepare
-          make modules_prepare
+          # Build the full kernel first (needed for modules)
+          make -j$(nproc) 2>&1 | tail -20
+          echo "=== Kernel built ==="
+          ls -la arch/x86/boot/bzImage
 
       - name: Build rt2800usb modules
         run: |
           cd ~/linux-source
-          make M=drivers/net/wireless/ralink/rt2x00 modules -j$(nproc)
-
-      - name: Verify built modules
-        run: |
-          cd ~/linux-source
-          echo "=== Built .ko files ==="
+          make M=drivers/net/wireless/ralink/rt2x00 modules -j$(nproc) 2>&1
+          echo "=== Module files ==="
           find drivers/net/wireless/ralink -name '*.ko' -ls
-          echo "=== Module info ==="
           find drivers/net/wireless/ralink -name 'rt2800usb.ko' -exec modinfo {} \;
 
       - name: Package modules
