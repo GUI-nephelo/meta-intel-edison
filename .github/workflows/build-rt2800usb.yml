@@ -37,7 +37,7 @@ jobs:
         id: cache-linux
         with:
           path: ~/linux-source
-          key: linux-${{ steps.vars.outputs.kernel_version }}-defconfig-v1
+          key: linux-${{ steps.vars.outputs.kernel_version }}-full-v1
 
       - name: Clone Linux kernel source
         if: steps.cache-linux.outputs.cache-hit != 'true'
@@ -53,62 +53,96 @@ jobs:
       - name: Prepare kernel config
         run: |
           cd ~/linux-source
-          # Use defconfig as base - has full x86_64 driver framework
+          # Start with x86_64 defconfig (has USB, NET, WLAN framework)
           make defconfig
-          # Enable rt2800usb driver and its dependencies
+
+          # Enable WLAN subsystem and dependencies
+          scripts/config --enable CONFIG_NET
+          scripts/config --enable CONFIG_WIRELESS
+          scripts/config --enable CONFIG_WLAN
+          scripts/config --enable CONFIG_CFG80211
+          scripts/config --enable CONFIG_MAC80211
+          scripts/config --enable CONFIG_USB
+          scripts/config --enable CONFIG_USB_SUPPORT
+
+          # Enable Ralink rt2x00 driver stack
           scripts/config --module CONFIG_RT2X00
           scripts/config --module CONFIG_RT2X00_LIB
-          scripts/config --enable CONFIG_RT2X00_LIB_CRYPTO
+          scripts/config --enable  CONFIG_RT2X00_LIB_CRYPTO
           scripts/config --module CONFIG_RT2X00_USB
           scripts/config --module CONFIG_RT2800_LIB
           scripts/config --module CONFIG_RT2800USB
-          scripts/config --enable CONFIG_RT2800USB_RT33XX
-          scripts/config --enable CONFIG_RT2800USB_RT35XX
-          scripts/config --enable CONFIG_RT2800USB_RT3573
-          scripts/config --enable CONFIG_RT2800USB_RT53XX
-          scripts/config --enable CONFIG_RT2800USB_RT55XX
-          scripts/config --enable CONFIG_RT2800USB_UNKNOWN
-          # Set local version to match Edison kernel
-          scripts/config --set-str CONFIG_LOCALVERSION "-edison-acpi-preempt-rt"
-          scripts/config --disable CONFIG_LOCALVERSION_AUTO
-          # Resolve all dependencies
-          make olddefconfig
-          echo "=== Verifying rt2800usb config ==="
-          grep -E 'CONFIG_RT(2x00|2800)' .config || echo "ERROR: RT config not found!"
+          scripts/config --enable  CONFIG_RT2800USB_RT33XX
+          scripts/config --enable  CONFIG_RT2800USB_RT35XX
+          scripts/config --enable  CONFIG_RT2800USB_RT3573
+          scripts/config --enable  CONFIG_RT2800USB_RT53XX
+          scripts/config --enable  CONFIG_RT2800USB_RT55XX
+          scripts/config --enable  CONFIG_RT2800USB_UNKNOWN
 
-      - name: Build kernel
+          # Match Edison kernel version string
+          scripts/config --set-str CONFIG_LOCALVERSION "-edison-acpi-preempt-rt"
+          scripts/config --disable  CONFIG_LOCALVERSION_AUTO
+
+          # Resolve all dependencies
+          yes '' | make oldconfig 2>&1 | tail -20
+
+          echo "=== Verifying RT2800USB config ==="
+          grep -E 'CONFIG_RT2800USB=' .config
+          grep -E 'CONFIG_RT2X00=' .config
+          grep -E 'CONFIG_RT2X00_USB=' .config
+          grep -E 'CONFIG_CFG80211=' .config
+          grep -E 'CONFIG_MAC80211=' .config
+
+          # Hard fail if RT2800USB not enabled as module
+          if ! grep -q 'CONFIG_RT2800USB=m' .config; then
+            echo "FATAL: CONFIG_RT2800USB is not set to =m!"
+            echo "Dumping all RT related config:"
+            grep -E 'CONFIG_RT' .config
+            exit 1
+          fi
+
+      - name: Build full kernel + modules
         run: |
           cd ~/linux-source
-          make -j$(nproc) 2>&1 | tail -5
+          # Build everything - kernel + all modules including rt2x00
+          make -j$(nproc) 2>&1 | tail -10
           echo "=== Kernel image ==="
           ls -la arch/x86/boot/bzImage
 
-      - name: Build rt2800usb modules
+      - name: Verify and collect rt2x00 modules
         run: |
           cd ~/linux-source
-          echo "Building rt2x00 subsystem..."
-          make M=drivers/net/wireless/ralink/rt2x00/ modules -j$(nproc)
-          echo "=== Searching for .ko files ==="
-          find drivers/net/wireless/ralink -name '*.ko' -ls || echo "NO .ko FILES FOUND"
-          echo "=== Module info ==="
-          find drivers/net/wireless/ralink -name '*.ko' -exec modinfo {} \;
+          echo "=== Searching ALL .ko files for rt2x00/rt2800 ==="
+          find . -name '*.ko' -path '*/ralink/*' -ls 2>/dev/null
+          find . -name '*rt2x00*' -o -name '*rt2800*' 2>/dev/null | grep -v '\.cmd$' | grep -v '\.o$' | grep -v '\.mod$'
+
+          KOS=$(find . -name '*.ko' -path '*/ralink/*' 2>/dev/null || true)
+          if [ -z "$KOS" ]; then
+            echo "=== FATAL: No .ko in ralink/ - searching broader ==="
+            find . -name 'rt2800usb.ko' 2>/dev/null || echo "rt2800usb.ko not found anywhere"
+            find . -name 'rt2x00*.ko' 2>/dev/null || echo "rt2x00*.ko not found anywhere"
+            echo "=== Checking if ralink dir exists ==="
+            ls -la drivers/net/wireless/ralink/ 2>/dev/null || echo "No ralink dir"
+            echo "=== Checking modules.order ==="
+            grep -i 'rt2x00\|rt2800' modules.order 2>/dev/null || echo "Not in modules.order either"
+            exit 1
+          fi
 
       - name: Package modules
         run: |
           mkdir -p output/modules
           cd ~/linux-source
-          KOS=$(find drivers/net/wireless/ralink -name '*.ko')
-          if [ -z "$KOS" ]; then
-            echo "FATAL: No .ko files found! Build must have failed silently."
-            exit 1
-          fi
-          echo "Copying modules:"
-          for ko in $KOS; do
-            echo "  $ko"
+          # Copy all rt2x00 related .ko files from wherever they are
+          find . -name '*.ko' | grep -E 'rt2x00|rt2800' | while read ko; do
+            echo "  Copying: $ko"
             cp "$ko" $GITHUB_WORKSPACE/output/modules/
           done
           echo "=== Package contents ==="
           ls -la $GITHUB_WORKSPACE/output/modules/
+          if [ -z "$(ls $GITHUB_WORKSPACE/output/modules/*.ko 2>/dev/null)" ]; then
+            echo "FATAL: No .ko files in output!"
+            exit 1
+          fi
 
       - name: Create install script
         run: |
@@ -116,7 +150,7 @@ jobs:
           cat > "$OUTDIR/install_on_edison.sh" << 'INSTALLSCRIPT'
           #!/bin/bash
           # Install rt2800usb modules on Intel Edison
-          # scp modules/* and this script to Edison, then: bash install_on_edison.sh
+          # scp this folder to Edison, then: bash install_on_edison.sh
           set -e
           KVER="6.12.3-edison-acpi-preempt-rt"
           SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
