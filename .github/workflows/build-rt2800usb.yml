@@ -5,7 +5,6 @@ on:
     branches: [build/rt2800usb]
     paths:
       - '.github/workflows/build-rt2800usb.yml'
-      - 'meta-intel-edison-bsp/recipes-kernel/linux/files/**'
   workflow_dispatch:
     inputs:
       kernel_version:
@@ -19,11 +18,20 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
 
     steps:
-      - name: Checkout meta-intel-edison
+      - name: Checkout meta-intel-edison (our fork)
         uses: actions/checkout@v4
+
+      - name: Checkout upstream meta-intel-edison for .cfg files
+        uses: actions/checkout@v4
+        with:
+          repository: edison-fw/meta-intel-edison
+          ref: master
+          path: upstream-edison
+          sparse-checkout: |
+            meta-intel-edison-bsp/recipes-kernel/linux/files
 
       - name: Set variables
         id: vars
@@ -37,7 +45,7 @@ jobs:
         id: cache-linux
         with:
           path: ~/linux-source
-          key: linux-${{ steps.vars.outputs.kernel_version }}-full-v1
+          key: linux-${{ steps.vars.outputs.kernel_version }}-full-v2
 
       - name: Clone Linux kernel source
         if: steps.cache-linux.outputs.cache-hit != 'true'
@@ -50,22 +58,83 @@ jobs:
       - name: Install dependencies
         run: sudo apt-get update && sudo apt-get install -y flex bison libelf-dev libssl-dev
 
-      - name: Prepare kernel config
+      - name: Prepare kernel config (matching Edison exactly)
         run: |
           cd ~/linux-source
-          # Start with x86_64 defconfig (has USB, NET, WLAN framework)
+          CFG_DIR="$GITHUB_WORKSPACE/upstream-edison/meta-intel-edison-bsp/recipes-kernel/linux/files"
+
+          echo "=== Available .cfg files ==="
+          ls "$CFG_DIR"/*.cfg 2>/dev/null | wc -l
+
           make defconfig
 
-          # Enable WLAN subsystem and dependencies
-          scripts/config --enable CONFIG_NET
-          scripts/config --enable CONFIG_WIRELESS
-          scripts/config --enable CONFIG_WLAN
-          scripts/config --enable CONFIG_CFG80211
-          scripts/config --enable CONFIG_MAC80211
-          scripts/config --enable CONFIG_USB
-          scripts/config --enable CONFIG_USB_SUPPORT
+          FRAGMENTS=""
+          for cfg in \
+            0001-enable-to-build-a-netboot-image.cfg \
+            0002-enable-x2APIC.cfg \
+            0003-enable-NETCONSOLE_DYNAMIC.cfg \
+            0004-enable-STMMAC.cfg \
+            0005-enable-IGB.cfg \
+            0006-enable-IXGBE.cfg \
+            0007-enable-USB_RTL8152.cfg \
+            0008-disable-HPET.cfg \
+            0009-disable-i915-DRM.cfg \
+            0010-enable-X86_INTEL_MID.cfg \
+            0011-enable-INPUT_SOC_BUTTON_ARRAY.cfg \
+            0012-enable-I2C_HID-and-HID_MULTITOUCH.cfg \
+            0013-DEBUG_SHIRQ-DEBUG_LOCKDEP.cfg \
+            0014-enable-ACPI_DEBUG-and-ACPI_PROCFS_POWER.cfg \
+            0015-enable-ACPI_TABLE_UPGRADE.cfg \
+            0016-enable-X86_INTEL_LPSS-and-LPSS-drivers.cfg \
+            0017-enable-MFD_INTEL_LPSS-drivers.cfg \
+            0018-enable-INTEL_IDMA64-iDMA-64-bit.cfg \
+            0020-enable-SPI_DW.cfg \
+            0021-disable-HDA-audio.cfg \
+            0022-enable-Intel-Quark-devices.cfg \
+            0023-enable-DEBUG_GPIO.cfg \
+            0024-enable-GPIO_DWAPB.cfg \
+            0025-enable-GPIO_PCA953X.cfg \
+            0029-enable-INTEL_IDLE.cfg \
+            0030-enable-PUNIT_ATOM_DEBUG.cfg \
+            0031-enable-REGULATOR.cfg \
+            0032-enable-BRCMFMAC.cfg \
+            0033-enable-BT_HCIUART_BCM.cfg \
+            0034-enable-ADS7950.cfg \
+            0035-enable-ACPI_CONFIGFS.cfg \
+            0036-enable-SND_SST_ATOM_HIFI2_PLATFORM.cfg \
+            0037-enable-SND_SOC_SOF-nocodec.cfg \
+            0038-enable-PHY_TUSB1210.cfg \
+            0039-enable-USB_CONFIGFS.cfg \
+            0040-enable-INTEL_MRFLD_ADC.cfg \
+            0041-enable-EXTCON_INTEL_MRFLD.cfg \
+            0042-disable-LOCALVERSION_AUTO.cfg \
+            preempt.cfg \
+            ftdi_sio.cfg \
+            ch341.cfg \
+            smsc95xx.cfg \
+            bt_more.cfg \
+            i2c_chardev.cfg \
+            configfs.cfg \
+            bridge.cfg \
+            leds.cfg \
+            bpf.cfg \
+            btrfs.cfg \
+            sof_nocodec.cfg \
+            audio.cfg \
+            tun.cfg \
+            iio.cfg \
+            cdc_eem.cfg \
+            namespaces.cfg; do
+            if [ -f "$CFG_DIR/$cfg" ]; then
+              FRAGMENTS="$FRAGMENTS $CFG_DIR/$cfg"
+            else
+              echo "WARNING: $cfg not found, skipping"
+            fi
+          done
 
-          # Enable Ralink rt2x00 driver stack
+          echo "=== Merging $(echo $FRAGMENTS | wc -w) config fragments ==="
+          scripts/kconfig/merge_config.sh -m .config $FRAGMENTS 2>&1 | tail -30
+
           scripts/config --module CONFIG_RT2X00
           scripts/config --module CONFIG_RT2X00_LIB
           scripts/config --enable  CONFIG_RT2X00_LIB_CRYPTO
@@ -79,52 +148,45 @@ jobs:
           scripts/config --enable  CONFIG_RT2800USB_RT55XX
           scripts/config --enable  CONFIG_RT2800USB_UNKNOWN
 
-          # Match Edison kernel version string
           scripts/config --set-str CONFIG_LOCALVERSION "-edison-acpi-preempt-rt"
           scripts/config --disable  CONFIG_LOCALVERSION_AUTO
 
-          # Resolve all dependencies
           yes '' | make oldconfig 2>&1 | tail -20
 
-          echo "=== Verifying RT2800USB config ==="
-          grep -E 'CONFIG_RT2800USB=' .config
-          grep -E 'CONFIG_RT2X00=' .config
-          grep -E 'CONFIG_RT2X00_USB=' .config
-          grep -E 'CONFIG_CFG80211=' .config
-          grep -E 'CONFIG_MAC80211=' .config
+          echo "=== Verifying key configs ==="
+          grep -E 'CONFIG_RT2800USB=' .config || echo "MISSING: RT2800USB"
+          grep -E 'CONFIG_RT2X00=' .config || echo "MISSING: RT2X00"
+          grep -E 'CONFIG_CFG80211=' .config || echo "MISSING: CFG80211"
+          grep -E 'CONFIG_MAC80211=' .config || echo "MISSING: MAC80211"
+          grep -E 'CONFIG_PREEMPT_RT=' .config || echo "MISSING: PREEMPT_RT"
+          grep -E 'CONFIG_LOCALVERSION=' .config || echo "MISSING: LOCALVERSION"
+          grep -E 'CONFIG_MODULE_SIG=' .config
+          grep -E 'CONFIG_MODULE_SIG_FORCE=' .config
 
-          # Hard fail if RT2800USB not enabled as module
           if ! grep -q 'CONFIG_RT2800USB=m' .config; then
-            echo "FATAL: CONFIG_RT2800USB is not set to =m!"
-            echo "Dumping all RT related config:"
+            echo "FATAL: CONFIG_RT2800USB not set to =m!"
             grep -E 'CONFIG_RT' .config
             exit 1
           fi
 
+          echo "=== Config line count ==="
+          grep -c '=y\|=m' .config
+
       - name: Build full kernel + modules
         run: |
           cd ~/linux-source
-          # Build everything - kernel + all modules including rt2x00
-          make -j$(nproc) 2>&1 | tail -10
+          make -j$(nproc) 2>&1 | tail -20
           echo "=== Kernel image ==="
           ls -la arch/x86/boot/bzImage
 
       - name: Verify and collect rt2x00 modules
         run: |
           cd ~/linux-source
-          echo "=== Searching ALL .ko files for rt2x00/rt2800 ==="
-          find . -name '*.ko' -path '*/ralink/*' -ls 2>/dev/null
-          find . -name '*rt2x00*' -o -name '*rt2800*' 2>/dev/null | grep -v '\.cmd$' | grep -v '\.o$' | grep -v '\.mod$'
-
-          KOS=$(find . -name '*.ko' -path '*/ralink/*' 2>/dev/null || true)
-          if [ -z "$KOS" ]; then
-            echo "=== FATAL: No .ko in ralink/ - searching broader ==="
-            find . -name 'rt2800usb.ko' 2>/dev/null || echo "rt2800usb.ko not found anywhere"
-            find . -name 'rt2x00*.ko' 2>/dev/null || echo "rt2x00*.ko not found anywhere"
-            echo "=== Checking if ralink dir exists ==="
-            ls -la drivers/net/wireless/ralink/ 2>/dev/null || echo "No ralink dir"
-            echo "=== Checking modules.order ==="
-            grep -i 'rt2x00\|rt2800' modules.order 2>/dev/null || echo "Not in modules.order either"
+          echo "=== Searching for rt2x00 .ko files ==="
+          find . -name '*.ko' | grep -E 'rt2x00|rt2800'
+          if [ -z "$(find . -name '*.ko' | grep -E 'rt2x00|rt2800')" ]; then
+            echo "FATAL: No rt2x00/rt2800 .ko files found!"
+            grep -i 'rt2x00\|rt2800' modules.order 2>/dev/null || true
             exit 1
           fi
 
@@ -132,7 +194,6 @@ jobs:
         run: |
           mkdir -p output/modules
           cd ~/linux-source
-          # Copy all rt2x00 related .ko files from wherever they are
           find . -name '*.ko' | grep -E 'rt2x00|rt2800' | while read ko; do
             echo "  Copying: $ko"
             cp "$ko" $GITHUB_WORKSPACE/output/modules/
@@ -143,14 +204,15 @@ jobs:
             echo "FATAL: No .ko files in output!"
             exit 1
           fi
+          echo "=== Module vermagic ==="
+          modinfo $GITHUB_WORKSPACE/output/modules/rt2800usb.ko 2>/dev/null | grep vermagic || \
+            strings $GITHUB_WORKSPACE/output/modules/rt2800usb.ko | grep vermagic
 
       - name: Create install script
         run: |
           OUTDIR="$GITHUB_WORKSPACE/output"
           cat > "$OUTDIR/install_on_edison.sh" << 'INSTALLSCRIPT'
           #!/bin/bash
-          # Install rt2800usb modules on Intel Edison
-          # scp this folder to Edison, then: bash install_on_edison.sh
           set -e
           KVER="6.12.3-edison-acpi-preempt-rt"
           SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -161,8 +223,11 @@ jobs:
           cp -v "$SCRIPT_DIR/modules/"*.ko "$MODDIR/"
           echo "Updating module dependencies..."
           depmod -a "$KVER"
-          echo "Loading modules..."
-          modprobe rt2800usb
+          echo "Loading modules in dependency order..."
+          insmod "$MODDIR/rt2x00lib.ko"
+          insmod "$MODDIR/rt2x00usb.ko"
+          insmod "$MODDIR/rt2800lib.ko"
+          insmod "$MODDIR/rt2800usb.ko"
           echo "Verifying..."
           lsmod | grep rt2x00
           ip link show wlan1 2>/dev/null && echo "SUCCESS: wlan1 interface created!" || echo "Check: ip link; dmesg | tail -20"
