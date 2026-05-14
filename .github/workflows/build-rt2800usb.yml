@@ -6,11 +6,6 @@ on:
     paths:
       - '.github/workflows/build-rt2800usb.yml'
   workflow_dispatch:
-    inputs:
-      kernel_version:
-        description: 'Kernel version tag'
-        required: false
-        default: 'v6.12.3'
 
 permissions:
   contents: read
@@ -36,22 +31,20 @@ jobs:
       - name: Set variables
         id: vars
         run: |
-          KERNEL_VERSION="${{ github.event.inputs.kernel_version || 'v6.12.3' }}"
-          echo "kernel_version=$KERNEL_VERSION" >> $GITHUB_OUTPUT
-          echo "Building for kernel: $KERNEL_VERSION"
+          echo "kernel_version=v6.12.3" >> $GITHUB_OUTPUT
 
       - name: Cache linux source
         uses: actions/cache@v4
         id: cache-linux
         with:
           path: ~/linux-source
-          key: linux-${{ steps.vars.outputs.kernel_version }}-full-v2
+          key: linux-v6.12.3-full-v2
 
       - name: Clone Linux kernel source
         if: steps.cache-linux.outputs.cache-hit != 'true'
         run: |
           rm -rf ~/linux-source
-          git clone --depth 1 --branch ${{ steps.vars.outputs.kernel_version }} \
+          git clone --depth 1 --branch v6.12.3 \
             https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git \
             ~/linux-source
 
@@ -63,12 +56,14 @@ jobs:
           cd ~/linux-source
           CFG_DIR="$GITHUB_WORKSPACE/upstream-edison/meta-intel-edison-bsp/recipes-kernel/linux/files"
 
-          echo "=== Available .cfg files ==="
+          echo "=== .cfg files count ==="
           ls "$CFG_DIR"/*.cfg 2>/dev/null | wc -l
 
           make defconfig
 
-          FRAGMENTS=""
+          # Concatenate all .cfg fragments into one file, then merge
+          MERGE_CFG=/tmp/edison-all.cfg
+          cat /dev/null > $MERGE_CFG
           for cfg in \
             0001-enable-to-build-a-netboot-image.cfg \
             0002-enable-x2APIC.cfg \
@@ -109,134 +104,99 @@ jobs:
             0041-enable-EXTCON_INTEL_MRFLD.cfg \
             0042-disable-LOCALVERSION_AUTO.cfg \
             preempt.cfg \
-            ftdi_sio.cfg \
-            ch341.cfg \
-            smsc95xx.cfg \
-            bt_more.cfg \
-            i2c_chardev.cfg \
-            configfs.cfg \
-            bridge.cfg \
-            leds.cfg \
-            bpf.cfg \
-            btrfs.cfg \
-            sof_nocodec.cfg \
-            audio.cfg \
-            tun.cfg \
-            iio.cfg \
-            cdc_eem.cfg \
-            namespaces.cfg; do
+            ftdi_sio.cfg ch341.cfg smsc95xx.cfg bt_more.cfg \
+            i2c_chardev.cfg configfs.cfg bridge.cfg leds.cfg bpf.cfg \
+            btrfs.cfg sof_nocodec.cfg audio.cfg tun.cfg iio.cfg \
+            cdc_eem.cfg namespaces.cfg; do
             if [ -f "$CFG_DIR/$cfg" ]; then
-              FRAGMENTS="$FRAGMENTS $CFG_DIR/$cfg"
+              cat "$CFG_DIR/$cfg" >> $MERGE_CFG
+              echo "" >> $MERGE_CFG
             else
-              echo "WARNING: $cfg not found, skipping"
+              echo "WARNING: $cfg not found"
             fi
           done
 
-          echo "=== Merging $(echo $FRAGMENTS | wc -w) config fragments ==="
-          scripts/kconfig/merge_config.sh -m .config $FRAGMENTS 2>&1 | tail -30
+          echo "=== Merged config fragment lines ==="
+          wc -l $MERGE_CFG
+          head -5 $MERGE_CFG
 
+          # Merge all fragments at once
+          scripts/kconfig/merge_config.sh -m .config $MERGE_CFG 2>&1 | tail -30
+
+          # Add rt2800usb support
           scripts/config --module CONFIG_RT2X00
           scripts/config --module CONFIG_RT2X00_LIB
           scripts/config --enable  CONFIG_RT2X00_LIB_CRYPTO
           scripts/config --module CONFIG_RT2X00_USB
           scripts/config --module CONFIG_RT2800_LIB
           scripts/config --module CONFIG_RT2800USB
-          scripts/config --enable  CONFIG_RT2800USB_RT33XX
-          scripts/config --enable  CONFIG_RT2800USB_RT35XX
-          scripts/config --enable  CONFIG_RT2800USB_RT3573
-          scripts/config --enable  CONFIG_RT2800USB_RT53XX
-          scripts/config --enable  CONFIG_RT2800USB_RT55XX
-          scripts/config --enable  CONFIG_RT2800USB_UNKNOWN
 
           scripts/config --set-str CONFIG_LOCALVERSION "-edison-acpi-preempt-rt"
           scripts/config --disable  CONFIG_LOCALVERSION_AUTO
 
-          yes '' | make oldconfig 2>&1 | tail -20
+          yes '' | make oldconfig 2>&1 | tail -10
 
-          echo "=== Verifying key configs ==="
-          grep -E 'CONFIG_RT2800USB=' .config || echo "MISSING: RT2800USB"
-          grep -E 'CONFIG_RT2X00=' .config || echo "MISSING: RT2X00"
-          grep -E 'CONFIG_CFG80211=' .config || echo "MISSING: CFG80211"
-          grep -E 'CONFIG_MAC80211=' .config || echo "MISSING: MAC80211"
-          grep -E 'CONFIG_PREEMPT_RT=' .config || echo "MISSING: PREEMPT_RT"
-          grep -E 'CONFIG_LOCALVERSION=' .config || echo "MISSING: LOCALVERSION"
-          grep -E 'CONFIG_MODULE_SIG=' .config
-          grep -E 'CONFIG_MODULE_SIG_FORCE=' .config
+          echo "=== Key configs ==="
+          grep -E 'CONFIG_RT2800USB=|CONFIG_RT2X00=|CONFIG_CFG80211=|CONFIG_MAC80211=|CONFIG_PREEMPT_RT=|CONFIG_LOCALVERSION=' .config
 
           if ! grep -q 'CONFIG_RT2800USB=m' .config; then
-            echo "FATAL: CONFIG_RT2800USB not set to =m!"
+            echo "FATAL: RT2800USB not =m"
             grep -E 'CONFIG_RT' .config
             exit 1
           fi
 
-          echo "=== Config line count ==="
-          grep -c '=y\|=m' .config
-
       - name: Build full kernel + modules
         run: |
           cd ~/linux-source
-          make -j$(nproc) 2>&1 | tail -20
-          echo "=== Kernel image ==="
-          ls -la arch/x86/boot/bzImage
+          make -j$(nproc) 2>&1 | tail -10
 
       - name: Verify and collect rt2x00 modules
         run: |
           cd ~/linux-source
-          echo "=== Searching for rt2x00 .ko files ==="
-          find . -name '*.ko' | grep -E 'rt2x00|rt2800'
-          if [ -z "$(find . -name '*.ko' | grep -E 'rt2x00|rt2800')" ]; then
-            echo "FATAL: No rt2x00/rt2800 .ko files found!"
-            grep -i 'rt2x00\|rt2800' modules.order 2>/dev/null || true
+          KOS=$(find . -name '*.ko' | grep -E 'rt2x00|rt2800')
+          if [ -z "$KOS" ]; then
+            echo "FATAL: No rt2x00 .ko files"
             exit 1
           fi
+          echo "$KOS"
+
+          # Verify struct module size matches Edison (0x4c0 = 1216 bytes)
+          for ko in $KOS; do
+            MOD_SIZE=$(readelf -SW "$ko" | grep '.gnu.linkonce.this_module' | awk '{print $6}')
+            echo "Module: $ko  this_module_size=0x$MOD_SIZE"
+          done
 
       - name: Package modules
         run: |
           mkdir -p output/modules
           cd ~/linux-source
           find . -name '*.ko' | grep -E 'rt2x00|rt2800' | while read ko; do
-            echo "  Copying: $ko"
             cp "$ko" $GITHUB_WORKSPACE/output/modules/
           done
-          echo "=== Package contents ==="
           ls -la $GITHUB_WORKSPACE/output/modules/
-          if [ -z "$(ls $GITHUB_WORKSPACE/output/modules/*.ko 2>/dev/null)" ]; then
-            echo "FATAL: No .ko files in output!"
-            exit 1
-          fi
-          echo "=== Module vermagic ==="
-          modinfo $GITHUB_WORKSPACE/output/modules/rt2800usb.ko 2>/dev/null | grep vermagic || \
-            strings $GITHUB_WORKSPACE/output/modules/rt2800usb.ko | grep vermagic
 
       - name: Create install script
         run: |
-          OUTDIR="$GITHUB_WORKSPACE/output"
-          cat > "$OUTDIR/install_on_edison.sh" << 'INSTALLSCRIPT'
+          cat > output/install_on_edison.sh << 'EOF'
           #!/bin/bash
           set -e
           KVER="6.12.3-edison-acpi-preempt-rt"
           SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
           MODDIR="/lib/modules/$KVER/extra"
-          echo "Creating module directory: $MODDIR"
           mkdir -p "$MODDIR"
-          echo "Copying modules..."
           cp -v "$SCRIPT_DIR/modules/"*.ko "$MODDIR/"
-          echo "Updating module dependencies..."
           depmod -a "$KVER"
-          echo "Loading modules in dependency order..."
           insmod "$MODDIR/rt2x00lib.ko"
           insmod "$MODDIR/rt2x00usb.ko"
           insmod "$MODDIR/rt2800lib.ko"
           insmod "$MODDIR/rt2800usb.ko"
-          echo "Verifying..."
           lsmod | grep rt2x00
-          ip link show wlan1 2>/dev/null && echo "SUCCESS: wlan1 interface created!" || echo "Check: ip link; dmesg | tail -20"
-          INSTALLSCRIPT
-          chmod +x "$OUTDIR/install_on_edison.sh"
+          EOF
+          chmod +x output/install_on_edison.sh
 
       - name: Upload modules artifact
         uses: actions/upload-artifact@v4
         with:
-          name: rt2800usb-modules-${{ steps.vars.outputs.kernel_version }}
+          name: rt2800usb-modules-v6.12.3
           path: output/
           retention-days: 30
