@@ -1,0 +1,196 @@
+name: Build snd-usb-audio kernel module
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [snd-usb-audio]
+    paths:
+      - '.github/workflows/build-snd-usb-audio.yml'
+      - 'meta-intel-edison-bsp/recipes-kernel/linux/files/snd-usb-audio.cfg'
+
+env:
+  KERNEL_VERSION: "6.12.3"
+  KERNEL_BRANCH: "linux-6.12.y"
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 90
+    steps:
+      - name: Free disk space
+        run: |
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc
+          sudo apt-get clean
+          df -h
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bc bison build-essential flex libelf-dev libssl-dev
+
+      - name: Checkout meta-intel-edison
+        uses: actions/checkout@v4
+
+      - name: Cache kernel source
+        id: cache-kernel
+        uses: actions/cache@v4
+        with:
+          path: linux-src
+          key: kernel-${{ env.KERNEL_VERSION }}-v1
+
+      - name: Clone stable kernel
+        if: steps.cache-kernel.outputs.cache-hit != 'true'
+        run: |
+          git clone --depth 1 --branch ${KERNEL_BRANCH} \
+            https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git linux-src
+
+      - name: Apply Edison patches
+        working-directory: linux-src
+        run: |
+          CFG_DIR="${GITHUB_WORKSPACE}/meta-intel-edison-bsp/recipes-kernel/linux/files"
+          PATCHES=(
+            "0044-REVERTME-usb-dwc3-gadget-skip-endpoints-ep-18-in-out.patch"
+            "0001-8250_mid-arm-rx-dma-on-all-ports-with-dma-continousl.patch"
+            "0001a-usb-dwc3-core-Fix-dwc3_core_soft_reset-before-anythi.patch"
+            "0001-phy-ti-tusb1210-write-to-scratch-on-power-on.patch"
+            "0092-platform-x86-intel_scu_ipc-Replace-workaround-by-32-.patch"
+            "0093-platform-x86-intel_scu_ipc-Simplify-code-with-cleanu.patch"
+            "0094-platform-x86-intel_scu_ipc-Save-a-copy-of-the-entire.patch"
+          )
+          for p in "${PATCHES[@]}"; do
+            echo "Applying $p"
+            git apply "${CFG_DIR}/${p}" || echo "WARN: $p did not apply cleanly"
+          done
+
+      - name: Build kernel config
+        working-directory: linux-src
+        run: |
+          CFG_DIR="${GITHUB_WORKSPACE}/meta-intel-edison-bsp/recipes-kernel/linux/files"
+
+          # Edison kernel is x86_64 despite edison.conf saying i386
+          # (confirmed: running system is ELF64, gcc is x86_64-poky-linux)
+          make x86_64_defconfig
+
+          # All .cfg fragments from linux-yocto_lts.bb, in order
+          FRAGMENTS=(
+            0001-enable-to-build-a-netboot-image.cfg
+            0002-enable-x2APIC.cfg
+            0003-enable-NETCONSOLE_DYNAMIC.cfg
+            0004-enable-STMMAC.cfg
+            0005-enable-IGB.cfg
+            0006-enable-IXGBE.cfg
+            0007-enable-USB_RTL8152.cfg
+            0008-disable-HPET.cfg
+            0009-disable-i915-DRM.cfg
+            0010-enable-X86_INTEL_MID.cfg
+            0011-enable-INPUT_SOC_BUTTON_ARRAY.cfg
+            0012-enable-I2C-HID-and-HID_MULTITOUCH.cfg
+            0013-DEBUG_SHIRQ-DEBUG_LOCKDEP.cfg
+            0014-enable-ACPI_DEBUG-and-ACPI_PROCFS_POWER.cfg
+            0015-enable-ACPI_TABLE_UPGRADE.cfg
+            0016-enable-X86_INTEL_LPSS-and-LPSS-drivers.cfg
+            0017-enable-MFD_INTEL_LPSS-drivers.cfg
+            0018-enable-INTEL_IDMA64-iDMA-64-bit.cfg
+            0020-enable-SPI_DW.cfg
+            0021-disable-HDA-audio.cfg
+            0022-enable-Intel-Quark-devices.cfg
+            0023-enable-DEBUG_GPIO.cfg
+            0024-enable-GPIO_DWAPB.cfg
+            0025-enable-GPIO_PCA953X.cfg
+            0029-enable-INTEL_IDLE.cfg
+            0030-enable-PUNIT_ATOM_DEBUG.cfg
+            0031-enable-REGULATOR.cfg
+            0032-enable-BRCMFMAC.cfg
+            0033-enable-BT_HCIUART_BCM.cfg
+            0034-enable-ADS7950.cfg
+            0035-enable-ACPI_CONFIGFS.cfg
+            0036-enable-SND_SST_ATOM_HIFI2_PLATFORM.cfg
+            0037-enable-SND_SOC_SOF-nocodec.cfg
+            0038-enable-PHY_TUSB1210.cfg
+            0039-enable-USB_CONFIGFS.cfg
+            0040-enable-INTEL_MRFLD_ADC.cfg
+            0041-enable-EXTCON_INTEL_MRFLD.cfg
+            0042-disable-LOCALVERSION_AUTO.cfg
+            ftdi_sio.cfg
+            ch341.cfg
+            smsc95xx.cfg
+            bt_more.cfg
+            i2c_chardev.cfg
+            configfs.cfg
+            bridge.cfg
+            leds.cfg
+            bpf.cfg
+            btrfs.cfg
+            sof_nocodec.cfg
+            audio.cfg
+            tun.cfg
+            iio.cfg
+            cdc_eem.cfg
+            namespaces.cfg
+            snd-usb-audio.cfg
+          )
+
+          # Preempt-RT config (edison uses PREEMPT_RT)
+          FRAGMENTS+=(preempt.cfg)
+
+          MERGE_ARGS=()
+          for f in "${FRAGMENTS[@]}"; do
+            if [ -f "${CFG_DIR}/${f}" ]; then
+              MERGE_ARGS+=("${CFG_DIR}/${f}")
+            else
+              echo "WARN: fragment $f not found, skipping"
+            fi
+          done
+
+          scripts/kconfig/merge_config.sh -m .config "${MERGE_ARGS[@]}"
+          make olddefconfig
+
+      - name: Verify config
+        working-directory: linux-src
+        run: |
+          echo "=== SND_USB_AUDIO ==="
+          grep -E "CONFIG_SND_USB_AUDIO|CONFIG_SND_USB=|CONFIG_SND=" .config
+          echo "=== 64BIT ==="
+          grep "CONFIG_64BIT" .config
+          echo "=== PREEMPT_RT ==="
+          grep "CONFIG_PREEMPT" .config
+
+      - name: Build modules_prepare
+        working-directory: linux-src
+        run: |
+          make -j$(nproc) modules_prepare
+
+      - name: Build snd-usb-audio module
+        working-directory: linux-src
+        run: |
+          make -j$(nproc) M=sound/usb modules
+
+      - name: Collect artifacts
+        run: |
+          KVER=$(cd linux-src && make kernelrelease)
+          echo "Kernel release: $KVER"
+          echo "KERNEL_RELEASE=$KVER" >> $GITHUB_ENV
+
+          mkdir -p output
+          # Collect all .ko from sound/usb
+          find linux-src/sound/usb -name '*.ko' -exec cp {} output/ \;
+          # Also collect any .ko.zst
+          find linux-src/sound/usb -name '*.ko.zst' -exec cp {} output/ \;
+          ls -la output/
+          file output/*.ko 2>/dev/null || true
+
+      - name: Verify module
+        run: |
+          for ko in output/*.ko; do
+            echo "=== $ko ==="
+            file "$ko"
+            readelf -h "$ko" 2>/dev/null | grep -E 'Class|Machine'
+            modinfo "$ko" 2>/dev/null | grep -E 'vermagic|depends|intree'
+          done
+
+      - name: Upload kernel module
+        uses: actions/upload-artifact@v4
+        with:
+          name: snd-usb-audio-${{ env.KERNEL_RELEASE }}
+          path: output/
+          retention-days: 90
