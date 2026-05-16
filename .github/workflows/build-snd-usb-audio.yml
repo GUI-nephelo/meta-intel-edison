@@ -33,7 +33,7 @@ jobs:
         id: cache-linux
         with:
           path: ~/linux-source
-          key: linux-v6.12.3-full-v3
+          key: linux-v6.12.3-snd-usb-v1
 
       - name: Clone Linux kernel source
         if: steps.cache-linux.outputs.cache-hit != 'true'
@@ -53,7 +53,6 @@ jobs:
 
           make defconfig
 
-          # Concatenate all .cfg fragments into one file, then merge
           MERGE_CFG=/tmp/edison-all.cfg
           cat /dev/null > $MERGE_CFG
           for cfg in \
@@ -108,12 +107,14 @@ jobs:
             fi
           done
 
-          # Merge all fragments at once
           scripts/kconfig/merge_config.sh -m .config $MERGE_CFG 2>&1 | tail -30
 
-          # Add snd-usb-audio support
+          # Enable snd-usb-audio and its missing dependencies as modules
+          # Edison kernel has SND_PCM builtin but missing SND_HWDEP, SND_RAWMIDI
           scripts/config --enable  CONFIG_SND_USB
           scripts/config --module  CONFIG_SND_USB_AUDIO
+          scripts/config --module  CONFIG_SND_HWDEP
+          scripts/config --module  CONFIG_SND_RAWMIDI
 
           scripts/config --set-str CONFIG_LOCALVERSION "-edison-acpi-preempt-rt"
           scripts/config --disable  CONFIG_LOCALVERSION_AUTO
@@ -121,11 +122,10 @@ jobs:
           yes '' | make oldconfig 2>&1 | tail -10
 
           echo "=== Key configs ==="
-          grep -E 'CONFIG_SND_USB_AUDIO=|CONFIG_SND_USB=|CONFIG_SND=|CONFIG_SOUND=|CONFIG_PREEMPT_RT=|CONFIG_LOCALVERSION=' .config
+          grep -E 'CONFIG_SND_USB_AUDIO=|CONFIG_SND_HWDEP=|CONFIG_SND_RAWMIDI=|CONFIG_SND_PCM=|CONFIG_SND=' .config
 
           if ! grep -q 'CONFIG_SND_USB_AUDIO=m' .config; then
             echo "FATAL: SND_USB_AUDIO not =m"
-            grep -E 'CONFIG_SND_USB' .config
             exit 1
           fi
 
@@ -134,21 +134,27 @@ jobs:
           cd ~/linux-source
           make -j$(nproc) 2>&1 | tail -10
 
-      - name: Verify and collect snd-usb-audio modules
+      - name: Verify and collect modules
         run: |
           cd ~/linux-source
-          KOS=$(find . -name '*.ko' | grep -E 'snd-usb-audio|snd-usbmidi-lib')
+          echo "=== snd-usb-audio ==="
+          find . -name 'snd-usb-audio.ko' 2>/dev/null
+          echo "=== snd-usbmidi-lib ==="
+          find . -name 'snd-usbmidi-lib.ko' 2>/dev/null
+          echo "=== snd-hwdep ==="
+          find . -name 'snd-hwdep.ko' 2>/dev/null
+          echo "=== snd-rawmidi ==="
+          find . -name 'snd-rawmidi.ko' 2>/dev/null
+
+          KOS=$(find . -name '*.ko' | grep -E 'snd-usb-audio|snd-usbmidi-lib|snd-hwdep|snd-rawmidi')
           if [ -z "$KOS" ]; then
-            echo "FATAL: No snd-usb-audio .ko files"
-            echo "Searching all sound/usb:"
-            find sound/usb -name '*.ko' 2>/dev/null || echo "NONE"
-            echo "Searching all snd modules:"
-            find . -name 'snd-usb*' 2>/dev/null || echo "NONE"
+            echo "FATAL: No .ko files found"
             exit 1
           fi
           echo "$KOS"
 
           for ko in $KOS; do
+            echo "--- $ko ---"
             file "$ko"
             modinfo "$ko" 2>/dev/null | grep -E 'vermagic|depends'
           done
@@ -157,7 +163,7 @@ jobs:
         run: |
           mkdir -p output/modules
           cd ~/linux-source
-          find . -name '*.ko' | grep -E 'snd-usb-audio|snd-usbmidi-lib' | while read ko; do
+          find . -name '*.ko' | grep -E 'snd-usb-audio|snd-usbmidi-lib|snd-hwdep|snd-rawmidi' | while read ko; do
             cp -v "$ko" $GITHUB_WORKSPACE/output/modules/
           done
           ls -la $GITHUB_WORKSPACE/output/modules/
@@ -173,6 +179,8 @@ jobs:
           mkdir -p "$MODDIR"
           cp -v "$SCRIPT_DIR/modules/"*.ko "$MODDIR/"
           depmod -a "$KVER"
+          modprobe snd-rawmidi
+          modprobe snd-hwdep
           modprobe snd-usb-audio
           echo "Module loaded. Check: aplay -l"
           EOF
