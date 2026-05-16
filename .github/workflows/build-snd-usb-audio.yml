@@ -33,7 +33,7 @@ jobs:
         id: cache-linux
         with:
           path: ~/linux-source
-          key: linux-v6.12.3-snd-usb-v3
+          key: linux-v6.12.3-snd-usb-v4
 
       - name: Clone Linux kernel source
         if: steps.cache-linux.outputs.cache-hit != 'true'
@@ -121,23 +121,29 @@ jobs:
           yes '' | make oldconfig 2>&1 | tail -10
 
           echo "=== Key configs ==="
-          grep -E 'CONFIG_SND_USB_AUDIO=|CONFIG_SND_HWDEP=|CONFIG_SND_RAWMIDI=|CONFIG_SND_PCM=|CONFIG_SND=' .config
+          grep -E 'CONFIG_SND_USB_AUDIO=|CONFIG_SND_HWDEP=|CONFIG_SND_RAWMIDI=|CONFIG_SND_PCM=|CONFIG_SND=|CONFIG_LOCALVERSION=' .config
 
           if ! grep -q 'CONFIG_SND_USB_AUDIO=m' .config; then
             echo "FATAL: SND_USB_AUDIO not =m"
             exit 1
           fi
 
-      - name: Neutralize setlocalversion for clean vermagic
+      - name: Ensure clean git tree for correct vermagic
         run: |
           cd ~/linux-source
-          # scripts/setlocalversion appends "+", "-dirty", etc. to the version.
-          # Replace it with a no-op so vermagic matches the running Edison kernel
-          # which was built with LOCALVERSION set by Yocto, not by this script.
-          echo '#!/bin/sh' > scripts/setlocalversion
-          chmod +x scripts/setlocalversion
+          # setlocalversion checks for uncommitted changes and appends -dirty.
+          # It also appends + when the commit has no tag in shallow clones.
+          # For v6.12.3 tag: setlocalversion finds the tag -> no + appended.
+          # But make modifies .config etc -> git reports dirty.
+          # Fix: stage and commit all changes so git sees a clean tree.
+          git config user.email "build@ci.local"
+          git config user.name "CI Build"
+          git add -A
+          git diff --cached --quiet || git commit -m "config: apply edison configs + snd-usb-audio"
+          echo "=== git status ==="
+          git status --short
           echo "=== setlocalversion output ==="
-          scripts/setlocalversion . || true
+          scripts/setlocalversion .
 
       - name: Build full kernel + modules
         run: |
@@ -147,11 +153,9 @@ jobs:
       - name: Verify vermagic and collect modules
         run: |
           cd ~/linux-source
-          echo "=== Check vermagic on built modules ==="
+          echo "=== Expected vermagic: 6.12.3-edison-acpi-preempt-rt SMP preempt_rt mod_unload ==="
           find . -name 'snd-rawmidi.ko' -exec modinfo {} \; 2>/dev/null | grep vermagic
           find . -name 'snd-usb-audio.ko' -exec modinfo {} \; 2>/dev/null | grep vermagic
-          echo "=== Expected ==="
-          echo "vermagic:       6.12.3-edison-acpi-preempt-rt SMP preempt_rt mod_unload"
 
           KOS=$(find . -name '*.ko' | grep -E 'snd-usb-audio|snd-usbmidi-lib|snd-hwdep|snd-rawmidi')
           if [ -z "$KOS" ]; then
