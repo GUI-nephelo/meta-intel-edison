@@ -33,7 +33,7 @@ jobs:
         id: cache-linux
         with:
           path: ~/linux-source
-          key: linux-v6.12.3-snd-usb-v1
+          key: linux-v6.12.3-snd-usb-v2
 
       - name: Clone Linux kernel source
         if: steps.cache-linux.outputs.cache-hit != 'true'
@@ -110,7 +110,6 @@ jobs:
           scripts/kconfig/merge_config.sh -m .config $MERGE_CFG 2>&1 | tail -30
 
           # Enable snd-usb-audio and its missing dependencies as modules
-          # Edison kernel has SND_PCM builtin but missing SND_HWDEP, SND_RAWMIDI
           scripts/config --enable  CONFIG_SND_USB
           scripts/config --module  CONFIG_SND_USB_AUDIO
           scripts/config --module  CONFIG_SND_HWDEP
@@ -129,22 +128,33 @@ jobs:
             exit 1
           fi
 
+      - name: Fix vermagic to avoid -dirty suffix
+        run: |
+          cd ~/linux-source
+          # The kernel build system appends -dirty via scripts/setlocalversion
+          # when git detects uncommitted changes (like .config modifications).
+          # Create an empty .scmversion to suppress this.
+          echo -n > .scmversion
+          # Also ensure scripts/setlocalversion won't add -dirty
+          # by making the index match the working tree for key files
+          git add -A 2>/dev/null || true
+          git config user.email "build@ci.local"
+          git config user.name "CI Build"
+          git commit --allow-empty -m "save working state" 2>/dev/null || true
+          echo "=== Verify no -dirty ==="
+          scripts/setlocalversion . || true
+
       - name: Build full kernel + modules
         run: |
           cd ~/linux-source
           make -j$(nproc) 2>&1 | tail -10
 
-      - name: Verify and collect modules
+      - name: Verify vermagic and collect modules
         run: |
           cd ~/linux-source
-          echo "=== snd-usb-audio ==="
-          find . -name 'snd-usb-audio.ko' 2>/dev/null
-          echo "=== snd-usbmidi-lib ==="
-          find . -name 'snd-usbmidi-lib.ko' 2>/dev/null
-          echo "=== snd-hwdep ==="
-          find . -name 'snd-hwdep.ko' 2>/dev/null
-          echo "=== snd-rawmidi ==="
-          find . -name 'snd-rawmidi.ko' 2>/dev/null
+          echo "=== Check vermagic on built modules ==="
+          find . -name 'snd-usb-audio.ko' -exec modinfo {} \; 2>/dev/null | grep vermagic
+          find . -name 'snd-rawmidi.ko' -exec modinfo {} \; 2>/dev/null | grep vermagic
 
           KOS=$(find . -name '*.ko' | grep -E 'snd-usb-audio|snd-usbmidi-lib|snd-hwdep|snd-rawmidi')
           if [ -z "$KOS" ]; then
@@ -170,7 +180,7 @@ jobs:
 
       - name: Create install script
         run: |
-          cat > output/install_on_edison.sh << 'EOF'
+          cat > output/install_on_edison.sh << 'SCRIPT'
           #!/bin/bash
           set -e
           KVER="6.12.3-edison-acpi-preempt-rt"
@@ -183,7 +193,7 @@ jobs:
           modprobe snd-hwdep
           modprobe snd-usb-audio
           echo "Module loaded. Check: aplay -l"
-          EOF
+          SCRIPT
           chmod +x output/install_on_edison.sh
 
       - name: Upload modules artifact
