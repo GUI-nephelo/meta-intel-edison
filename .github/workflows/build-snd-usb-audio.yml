@@ -33,7 +33,7 @@ jobs:
         id: cache-linux
         with:
           path: ~/linux-source
-          key: linux-v6.12.3-snd-usb-v2
+          key: linux-v6.12.3-snd-usb-v3
 
       - name: Clone Linux kernel source
         if: steps.cache-linux.outputs.cache-hit != 'true'
@@ -128,20 +128,15 @@ jobs:
             exit 1
           fi
 
-      - name: Fix vermagic to avoid -dirty suffix
+      - name: Neutralize setlocalversion for clean vermagic
         run: |
           cd ~/linux-source
-          # The kernel build system appends -dirty via scripts/setlocalversion
-          # when git detects uncommitted changes (like .config modifications).
-          # Create an empty .scmversion to suppress this.
-          echo -n > .scmversion
-          # Also ensure scripts/setlocalversion won't add -dirty
-          # by making the index match the working tree for key files
-          git add -A 2>/dev/null || true
-          git config user.email "build@ci.local"
-          git config user.name "CI Build"
-          git commit --allow-empty -m "save working state" 2>/dev/null || true
-          echo "=== Verify no -dirty ==="
+          # scripts/setlocalversion appends "+", "-dirty", etc. to the version.
+          # Replace it with a no-op so vermagic matches the running Edison kernel
+          # which was built with LOCALVERSION set by Yocto, not by this script.
+          echo '#!/bin/sh' > scripts/setlocalversion
+          chmod +x scripts/setlocalversion
+          echo "=== setlocalversion output ==="
           scripts/setlocalversion . || true
 
       - name: Build full kernel + modules
@@ -153,8 +148,10 @@ jobs:
         run: |
           cd ~/linux-source
           echo "=== Check vermagic on built modules ==="
-          find . -name 'snd-usb-audio.ko' -exec modinfo {} \; 2>/dev/null | grep vermagic
           find . -name 'snd-rawmidi.ko' -exec modinfo {} \; 2>/dev/null | grep vermagic
+          find . -name 'snd-usb-audio.ko' -exec modinfo {} \; 2>/dev/null | grep vermagic
+          echo "=== Expected ==="
+          echo "vermagic:       6.12.3-edison-acpi-preempt-rt SMP preempt_rt mod_unload"
 
           KOS=$(find . -name '*.ko' | grep -E 'snd-usb-audio|snd-usbmidi-lib|snd-hwdep|snd-rawmidi')
           if [ -z "$KOS" ]; then
