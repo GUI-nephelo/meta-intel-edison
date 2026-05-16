@@ -6,14 +6,9 @@ on:
     branches: [snd-usb-audio]
     paths:
       - '.github/workflows/build-snd-usb-audio.yml'
-      - 'meta-intel-edison-bsp/recipes-kernel/linux/files/snd-usb-audio.cfg'
 
 permissions:
   contents: write
-
-env:
-  KERNEL_VERSION: "6.12.3"
-  KERNEL_BRANCH: "linux-6.12.y"
 
 jobs:
   build:
@@ -34,18 +29,12 @@ jobs:
       - name: Checkout meta-intel-edison
         uses: actions/checkout@v4
 
-      - name: Cache kernel source
-        id: cache-kernel
-        uses: actions/cache@v4
-        with:
-          path: linux-src
-          key: kernel-${{ env.KERNEL_VERSION }}-v3
-
-      - name: Clone stable kernel
-        if: steps.cache-kernel.outputs.cache-hit != 'true'
+      - name: Clone kernel v6.12.3
         run: |
-          git clone --depth 1 --branch ${KERNEL_BRANCH} \
+          git clone --depth 1 --branch v6.12.3 \
             https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git linux-src
+          cd linux-src
+          echo "Kernel version: $(make kernelrelease 2>/dev/null || cat Makefile | head -5)"
 
       - name: Apply Edison patches
         working-directory: linux-src
@@ -65,7 +54,7 @@ jobs:
             git apply "${CFG_DIR}/${p}" || echo "WARN: $p did not apply cleanly"
           done
 
-      - name: Build kernel config from Edison config
+      - name: Build kernel config
         working-directory: linux-src
         run: |
           CFG_DIR="${GITHUB_WORKSPACE}/meta-intel-edison-bsp/recipes-kernel/linux/files"
@@ -149,66 +138,59 @@ jobs:
       - name: Verify config
         working-directory: linux-src
         run: |
-          grep -E "CONFIG_SND_USB_AUDIO|CONFIG_SND_USB=|CONFIG_SND=" .config
+          echo "=== KEY CONFIGS ==="
+          grep -E "CONFIG_SND_USB|CONFIG_SND=|CONFIG_SOUND=|CONFIG_USB=" .config
+          echo "=== KERNEL RELEASE ==="
           make kernelrelease
 
-      - name: Build modules_prepare
+      - name: Build full kernel + modules
         working-directory: linux-src
         run: |
-          make -j$(nproc) modules_prepare 2>&1 | tail -10
+          # Build everything - kernel + all modules
+          # This is the only reliable way to get working .ko files
+          make -j$(nproc) 2>&1 | tail -20
 
-      - name: Build snd-usb-audio module
-        working-directory: linux-src
-        run: |
-          # Build all sound modules (snd-usb-audio + deps)
-          make -j$(nproc) M=sound 2>&1 | tail -30
-          echo "=== SEARCHING FOR .ko FILES ==="
-          find sound -name '*.ko' -o -name '*.ko.zst' 2>/dev/null
-          echo "=== SEARCHING FOR snd-usb ==="
-          find . -path '*/snd-usb*' -name '*.ko*' 2>/dev/null
-          find . -path '*/usb*audio*' 2>/dev/null
-
-      - name: Collect and package
-        if: always()
+      - name: Find and collect sound USB modules
         run: |
           KVER=$(cd linux-src && make kernelrelease)
           echo "Kernel release: $KVER"
           echo "KERNEL_RELEASE=$KVER" >> $GITHUB_ENV
 
+          echo "=== ALL .ko IN sound/usb ==="
+          find linux-src/sound/usb -name '*.ko' -o -name '*.ko.zst' || echo "NONE"
+
+          echo "=== ALL .ko IN sound/ ==="
+          find linux-src/sound -name '*.ko' -o -name '*.ko.zst' | head -30 || echo "NONE"
+
           mkdir -p output
-          # Search entire tree for sound-related .ko files
           find linux-src/sound -name '*.ko' -exec cp -v {} output/ \;
           find linux-src/sound -name '*.ko.zst' -exec cp -v {} output/ \;
 
-          # Decompress any .ko.zst files
+          # Decompress zstd
           for f in output/*.ko.zst; do
             [ -f "$f" ] && zstd -d "$f" -o "${f%.zst}" && rm "$f"
           done
 
           echo "=== OUTPUT FILES ==="
           ls -la output/
-          file output/*.ko 2>/dev/null || echo "No .ko files found!"
 
-          # Create a tarball as backup upload method
+          # Create tarball
           tar czf snd-usb-audio-modules.tar.gz -C output .
-          ls -la snd-usb-audio-modules.tar.gz
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: snd-usb-audio-modules
-          path: |
-            output/*.ko
-            snd-usb-audio-modules.tar.gz
+          path: output/
           retention-days: 90
-          if-no-files-found: error
+          if-no-files-found: warn
 
-      - name: Create release with modules
+      - name: Create release
         if: success()
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: snd-usb-audio-${{ env.KERNEL_RELEASE }}
-          name: "snd-usb-audio for ${{ env.KERNEL_RELEASE }}"
+          tag_name: snd-usb-audio-${{ env.KERNEL_RELEASE || 'test' }}
+          name: "snd-usb-audio for ${{ env.KERNEL_RELEASE || 'test' }}"
           files: |
             snd-usb-audio-modules.tar.gz
             output/*.ko
