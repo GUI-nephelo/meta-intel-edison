@@ -36,7 +36,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: linux-src
-          key: kernel-${{ env.KERNEL_VERSION }}-v1
+          key: kernel-${{ env.KERNEL_VERSION }}-v2
 
       - name: Clone stable kernel
         if: steps.cache-kernel.outputs.cache-hit != 'true'
@@ -62,13 +62,13 @@ jobs:
             git apply "${CFG_DIR}/${p}" || echo "WARN: $p did not apply cleanly"
           done
 
-      - name: Build kernel config
+      - name: Build kernel config from Edison config
         working-directory: linux-src
         run: |
           CFG_DIR="${GITHUB_WORKSPACE}/meta-intel-edison-bsp/recipes-kernel/linux/files"
 
-          # Edison kernel is x86_64 despite edison.conf saying i386
-          # (confirmed: running system is ELF64, gcc is x86_64-poky-linux)
+          # Edison actually runs x86_64 despite edison.conf saying corei7-32
+          # Use x86_64_defconfig as base (same as what the actual build uses)
           make x86_64_defconfig
 
           # All .cfg fragments from linux-yocto_lts.bb, in order
@@ -130,7 +130,7 @@ jobs:
             snd-usb-audio.cfg
           )
 
-          # Preempt-RT config (edison uses PREEMPT_RT)
+          # Preempt-RT config
           FRAGMENTS+=(preempt.cfg)
 
           MERGE_ARGS=()
@@ -142,7 +142,17 @@ jobs:
             fi
           done
 
+          # Merge all fragments
           scripts/kconfig/merge_config.sh -m .config "${MERGE_ARGS[@]}"
+
+          # Set LOCALVERSION to match Edison kernel
+          scripts/config --set-str CONFIG_LOCALVERSION "-edison-acpi-preempt-rt"
+          scripts/config --disable CONFIG_LOCALVERSION_AUTO
+
+          # Ensure 64-bit
+          scripts/config --enable CONFIG_64BIT
+
+          # Resolve all dependencies
           make olddefconfig
 
       - name: Verify config
@@ -153,35 +163,43 @@ jobs:
           echo "=== 64BIT ==="
           grep "CONFIG_64BIT" .config
           echo "=== PREEMPT_RT ==="
-          grep "CONFIG_PREEMPT" .config
+          grep "CONFIG_PREEMPT" .config | head -5
+          echo "=== LOCALVERSION ==="
+          grep "CONFIG_LOCALVERSION" .config
+          echo "=== KERNEL RELEASE ==="
+          make kernelrelease
 
       - name: Build modules_prepare
         working-directory: linux-src
         run: |
-          make -j$(nproc) modules_prepare
+          make -j$(nproc) modules_prepare 2>&1 | tail -20
 
       - name: Build snd-usb-audio module
         working-directory: linux-src
         run: |
-          make -j$(nproc) M=sound/usb modules
+          # Build the entire sound subsystem first (since snd is builtin,
+          # we need snd-usb-audio as module)
+          # First build the built-in objects needed
+          make -j$(nproc) M=sound/usb modules 2>&1 | tail -30
 
       - name: Collect artifacts
+        if: always()
         run: |
           KVER=$(cd linux-src && make kernelrelease)
           echo "Kernel release: $KVER"
           echo "KERNEL_RELEASE=$KVER" >> $GITHUB_ENV
 
           mkdir -p output
-          # Collect all .ko from sound/usb
           find linux-src/sound/usb -name '*.ko' -exec cp {} output/ \;
-          # Also collect any .ko.zst
           find linux-src/sound/usb -name '*.ko.zst' -exec cp {} output/ \;
           ls -la output/
           file output/*.ko 2>/dev/null || true
 
       - name: Verify module
+        if: always()
         run: |
           for ko in output/*.ko; do
+            [ -f "$ko" ] || continue
             echo "=== $ko ==="
             file "$ko"
             readelf -h "$ko" 2>/dev/null | grep -E 'Class|Machine'
@@ -189,8 +207,9 @@ jobs:
           done
 
       - name: Upload kernel module
+        if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: snd-usb-audio-${{ env.KERNEL_RELEASE }}
+          name: snd-usb-audio-${{ env.KERNEL_RELEASE || 'unknown' }}
           path: output/
           retention-days: 90
