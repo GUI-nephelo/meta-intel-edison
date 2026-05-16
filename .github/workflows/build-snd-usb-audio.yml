@@ -8,6 +8,9 @@ on:
       - '.github/workflows/build-snd-usb-audio.yml'
       - 'meta-intel-edison-bsp/recipes-kernel/linux/files/snd-usb-audio.cfg'
 
+permissions:
+  contents: write
+
 env:
   KERNEL_VERSION: "6.12.3"
   KERNEL_BRANCH: "linux-6.12.y"
@@ -26,7 +29,7 @@ jobs:
       - name: Install build dependencies
         run: |
           sudo apt-get update
-          sudo apt-get install -y bc bison build-essential flex libelf-dev libssl-dev
+          sudo apt-get install -y bc bison build-essential flex libelf-dev libssl-dev zstd
 
       - name: Checkout meta-intel-edison
         uses: actions/checkout@v4
@@ -36,7 +39,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: linux-src
-          key: kernel-${{ env.KERNEL_VERSION }}-v2
+          key: kernel-${{ env.KERNEL_VERSION }}-v3
 
       - name: Clone stable kernel
         if: steps.cache-kernel.outputs.cache-hit != 'true'
@@ -67,11 +70,8 @@ jobs:
         run: |
           CFG_DIR="${GITHUB_WORKSPACE}/meta-intel-edison-bsp/recipes-kernel/linux/files"
 
-          # Edison actually runs x86_64 despite edison.conf saying corei7-32
-          # Use x86_64_defconfig as base (same as what the actual build uses)
           make x86_64_defconfig
 
-          # All .cfg fragments from linux-yocto_lts.bb, in order
           FRAGMENTS=(
             0001-enable-to-build-a-netboot-image.cfg
             0002-enable-x2APIC.cfg
@@ -128,61 +128,47 @@ jobs:
             cdc_eem.cfg
             namespaces.cfg
             snd-usb-audio.cfg
+            preempt.cfg
           )
-
-          # Preempt-RT config
-          FRAGMENTS+=(preempt.cfg)
 
           MERGE_ARGS=()
           for f in "${FRAGMENTS[@]}"; do
             if [ -f "${CFG_DIR}/${f}" ]; then
               MERGE_ARGS+=("${CFG_DIR}/${f}")
             else
-              echo "WARN: fragment $f not found, skipping"
+              echo "WARN: fragment $f not found"
             fi
           done
 
-          # Merge all fragments
           scripts/kconfig/merge_config.sh -m .config "${MERGE_ARGS[@]}"
-
-          # Set LOCALVERSION to match Edison kernel
           scripts/config --set-str CONFIG_LOCALVERSION "-edison-acpi-preempt-rt"
           scripts/config --disable CONFIG_LOCALVERSION_AUTO
-
-          # Ensure 64-bit
           scripts/config --enable CONFIG_64BIT
-
-          # Resolve all dependencies
           make olddefconfig
 
       - name: Verify config
         working-directory: linux-src
         run: |
-          echo "=== SND_USB_AUDIO ==="
           grep -E "CONFIG_SND_USB_AUDIO|CONFIG_SND_USB=|CONFIG_SND=" .config
-          echo "=== 64BIT ==="
-          grep "CONFIG_64BIT" .config
-          echo "=== PREEMPT_RT ==="
-          grep "CONFIG_PREEMPT" .config | head -5
-          echo "=== LOCALVERSION ==="
-          grep "CONFIG_LOCALVERSION" .config
-          echo "=== KERNEL RELEASE ==="
           make kernelrelease
 
       - name: Build modules_prepare
         working-directory: linux-src
         run: |
-          make -j$(nproc) modules_prepare 2>&1 | tail -20
+          make -j$(nproc) modules_prepare 2>&1 | tail -10
 
       - name: Build snd-usb-audio module
         working-directory: linux-src
         run: |
-          # Build the entire sound subsystem first (since snd is builtin,
-          # we need snd-usb-audio as module)
-          # First build the built-in objects needed
-          make -j$(nproc) M=sound/usb modules 2>&1 | tail -30
+          # Build all sound modules (snd-usb-audio + deps)
+          make -j$(nproc) M=sound 2>&1 | tail -30
+          echo "=== SEARCHING FOR .ko FILES ==="
+          find sound -name '*.ko' -o -name '*.ko.zst' 2>/dev/null
+          echo "=== SEARCHING FOR snd-usb ==="
+          find . -path '*/snd-usb*' -name '*.ko*' 2>/dev/null
+          find . -path '*/usb*audio*' 2>/dev/null
 
-      - name: Collect artifacts
+      - name: Collect and package
         if: always()
         run: |
           KVER=$(cd linux-src && make kernelrelease)
@@ -190,26 +176,39 @@ jobs:
           echo "KERNEL_RELEASE=$KVER" >> $GITHUB_ENV
 
           mkdir -p output
-          find linux-src/sound/usb -name '*.ko' -exec cp {} output/ \;
-          find linux-src/sound/usb -name '*.ko.zst' -exec cp {} output/ \;
-          ls -la output/
-          file output/*.ko 2>/dev/null || true
+          # Search entire tree for sound-related .ko files
+          find linux-src/sound -name '*.ko' -exec cp -v {} output/ \;
+          find linux-src/sound -name '*.ko.zst' -exec cp -v {} output/ \;
 
-      - name: Verify module
-        if: always()
-        run: |
-          for ko in output/*.ko; do
-            [ -f "$ko" ] || continue
-            echo "=== $ko ==="
-            file "$ko"
-            readelf -h "$ko" 2>/dev/null | grep -E 'Class|Machine'
-            modinfo "$ko" 2>/dev/null | grep -E 'vermagic|depends|intree'
+          # Decompress any .ko.zst files
+          for f in output/*.ko.zst; do
+            [ -f "$f" ] && zstd -d "$f" -o "${f%.zst}" && rm "$f"
           done
 
-      - name: Upload kernel module
-        if: always()
+          echo "=== OUTPUT FILES ==="
+          ls -la output/
+          file output/*.ko 2>/dev/null || echo "No .ko files found!"
+
+          # Create a tarball as backup upload method
+          tar czf snd-usb-audio-modules.tar.gz -C output .
+          ls -la snd-usb-audio-modules.tar.gz
+
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: snd-usb-audio-${{ env.KERNEL_RELEASE || 'unknown' }}
-          path: output/
+          name: snd-usb-audio-modules
+          path: |
+            output/*.ko
+            snd-usb-audio-modules.tar.gz
           retention-days: 90
+          if-no-files-found: error
+
+      - name: Create release with modules
+        if: success()
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: snd-usb-audio-${{ env.KERNEL_RELEASE }}
+          name: "snd-usb-audio for ${{ env.KERNEL_RELEASE }}"
+          files: |
+            snd-usb-audio-modules.tar.gz
+            output/*.ko
