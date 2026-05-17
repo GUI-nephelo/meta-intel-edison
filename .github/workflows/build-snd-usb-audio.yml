@@ -28,31 +28,14 @@ jobs:
           sparse-checkout: |
             meta-intel-edison-bsp/recipes-kernel/linux/files
 
-      - name: Cache linux source
-        uses: actions/cache@v4
-        id: cache-linux
-        with:
-          path: ~/linux-source
-          key: linux-v6.12.3-snd-usb-v5
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y flex bison libelf-dev libssl-dev
 
       - name: Clone Linux kernel source
-        if: steps.cache-linux.outputs.cache-hit != 'true'
         run: |
-          rm -rf ~/linux-source
           git clone --depth 1 --branch v6.12.3 \
             https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git \
             ~/linux-source
-
-      - name: Clean cached source tree
-        if: steps.cache-linux.outputs.cache-hit == 'true'
-        run: |
-          cd ~/linux-source
-          git clean -fdx
-          git checkout .
-          echo "Cleaned cached source tree"
-
-      - name: Install dependencies
-        run: sudo apt-get update && sudo apt-get install -y flex bison libelf-dev libssl-dev
 
       - name: Prepare kernel config (matching Edison exactly)
         run: |
@@ -136,17 +119,18 @@ jobs:
             exit 1
           fi
 
-      - name: Ensure clean git tree for correct vermagic
+      - name: Fix vermagic by neutralizing setlocalversion
         run: |
           cd ~/linux-source
-          git config user.email "build@ci.local"
-          git config user.name "CI Build"
-          git add -A
-          git diff --cached --quiet || git commit -m "config: apply edison configs + snd-usb-audio"
-          echo "=== git status ==="
-          git status --short
-          echo "=== setlocalversion output ==="
-          scripts/setlocalversion .
+          # setlocalversion appends -dirty or + suffix on shallow clones.
+          # Neutralize it so LOCALVERSION alone controls the version string.
+          # CONFIG_LOCALVERSION is set to "-edison-acpi-preempt-rt" already.
+          printf '#!/bin/sh\n' > scripts/setlocalversion
+          chmod +x scripts/setlocalversion
+          echo "=== setlocalversion neutralized ==="
+          cat scripts/setlocalversion
+          echo "=== expected version ==="
+          grep CONFIG_LOCALVERSION .config
 
       - name: Build full kernel + modules
         run: |
