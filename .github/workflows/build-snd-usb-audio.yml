@@ -33,7 +33,7 @@ jobs:
         id: cache-linux
         with:
           path: ~/linux-source
-          key: linux-v6.12.3-snd-usb-v4
+          key: linux-v6.12.3-snd-usb-v5
 
       - name: Clone Linux kernel source
         if: steps.cache-linux.outputs.cache-hit != 'true'
@@ -42,6 +42,14 @@ jobs:
           git clone --depth 1 --branch v6.12.3 \
             https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git \
             ~/linux-source
+
+      - name: Clean cached source tree
+        if: steps.cache-linux.outputs.cache-hit == 'true'
+        run: |
+          cd ~/linux-source
+          git clean -fdx
+          git checkout .
+          echo "Cleaned cached source tree"
 
       - name: Install dependencies
         run: sudo apt-get update && sudo apt-get install -y flex bison libelf-dev libssl-dev
@@ -131,11 +139,6 @@ jobs:
       - name: Ensure clean git tree for correct vermagic
         run: |
           cd ~/linux-source
-          # setlocalversion checks for uncommitted changes and appends -dirty.
-          # It also appends + when the commit has no tag in shallow clones.
-          # For v6.12.3 tag: setlocalversion finds the tag -> no + appended.
-          # But make modifies .config etc -> git reports dirty.
-          # Fix: stage and commit all changes so git sees a clean tree.
           git config user.email "build@ci.local"
           git config user.name "CI Build"
           git add -A
