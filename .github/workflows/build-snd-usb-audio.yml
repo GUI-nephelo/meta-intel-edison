@@ -58,7 +58,7 @@ jobs:
             0009-disable-i915-DRM.cfg \
             0010-enable-X86_INTEL_MID.cfg \
             0011-enable-INPUT_SOC_BUTTON_ARRAY.cfg \
-            0012-enable-I2C-HID-and-HID_MULTITOUCH.cfg \
+            0012-enable-I2C_HID-and-HID_MULTITOUCH.cfg \
             0013-DEBUG_SHIRQ-DEBUG_LOCKDEP.cfg \
             0014-enable-ACPI_DEBUG-and-ACPI_PROCFS_POWER.cfg \
             0015-enable-ACPI_TABLE_UPGRADE.cfg \
@@ -119,23 +119,34 @@ jobs:
             exit 1
           fi
 
-      - name: Fix vermagic by neutralizing setlocalversion
+      - name: Fix version and prepare for build
         run: |
           cd ~/linux-source
-          # setlocalversion appends -dirty or + suffix on shallow clones.
-          # Neutralize it so LOCALVERSION alone controls the version string.
-          # CONFIG_LOCALVERSION is set to "-edison-acpi-preempt-rt" already.
+          KVER="6.12.3-edison-acpi-preempt-rt"
+
+          # Neutralize setlocalversion to prevent + or -dirty suffix
           printf '#!/bin/sh\n' > scripts/setlocalversion
           chmod +x scripts/setlocalversion
-          echo "=== setlocalversion neutralized ==="
-          cat scripts/setlocalversion
-          echo "=== expected version ==="
+
+          # Force the correct kernel release string
+          echo "$KVER" > include/config/kernel.release
+
+          # Run modules_prepare to generate required headers
+          make modules_prepare 2>&1 | tail -5
+
+          # Verify the version that will be used
+          echo "=== kernel.release ==="
+          cat include/config/kernel.release
+          echo "=== generated version ==="
+          cat include/generated/utsrelease.h 2>/dev/null | grep UTS_RELEASE
+          echo "=== LOCALVERSION ==="
           grep CONFIG_LOCALVERSION .config
 
-      - name: Build full kernel + modules
+      - name: Build modules
         run: |
           cd ~/linux-source
-          make -j$(nproc) 2>&1 | tail -10
+          # Build only the modules we need and their dependencies
+          make M=sound/core/hwdep M=sound/core/seq M=sound/core M=sound/usb -j$(nproc) 2>&1 | tail -20
 
       - name: Verify vermagic and collect modules
         run: |
@@ -143,6 +154,8 @@ jobs:
           echo "=== Expected vermagic: 6.12.3-edison-acpi-preempt-rt SMP preempt_rt mod_unload ==="
           find . -name 'snd-rawmidi.ko' -exec modinfo {} \; 2>/dev/null | grep vermagic
           find . -name 'snd-usb-audio.ko' -exec modinfo {} \; 2>/dev/null | grep vermagic
+          find . -name 'snd-hwdep.ko' -exec modinfo {} \; 2>/dev/null | grep vermagic
+          find . -name 'snd-usbmidi-lib.ko' -exec modinfo {} \; 2>/dev/null | grep vermagic
 
           KOS=$(find . -name '*.ko' | grep -E 'snd-usb-audio|snd-usbmidi-lib|snd-hwdep|snd-rawmidi')
           if [ -z "$KOS" ]; then
