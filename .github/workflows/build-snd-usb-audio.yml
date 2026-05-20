@@ -137,16 +137,15 @@ jobs:
           # Verify the version that will be used
           echo "=== kernel.release ==="
           cat include/config/kernel.release
-          echo "=== generated version ==="
-          cat include/generated/utsrelease.h 2>/dev/null | grep UTS_RELEASE
+          echo "=== generated utsrelease ==="
+          grep UTS_RELEASE include/generated/utsrelease.h
           echo "=== LOCALVERSION ==="
           grep CONFIG_LOCALVERSION .config
 
-      - name: Build modules
+      - name: Build kernel and modules
         run: |
           cd ~/linux-source
-          # Build only the modules we need and their dependencies
-          make M=sound/core/hwdep M=sound/core/seq M=sound/core M=sound/usb -j$(nproc) 2>&1 | tail -20
+          make -j$(nproc) 2>&1 | tail -10
 
       - name: Verify vermagic and collect modules
         run: |
