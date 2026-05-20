@@ -37,30 +37,31 @@ jobs:
             https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git \
             ~/linux-source
 
-      - name: Patch Makefile and neutralize setlocalversion
+      - name: Hardcode vermagic and kernel version
         run: |
           cd ~/linux-source
-          # The Edison kernel version is 6.12.3-edison-acpi-preempt-rt
-          # KERNELRELEASE = VERSION.PATCHLEVEL.SUBLEVEL + EXTRAVERSION + LOCALVERSION
-          # Instead of relying on CONFIG_LOCALVERSION (which interacts badly
-          # with setlocalversion), set EXTRAVERSION directly in the Makefile
-          # and disable LOCALVERSION completely.
-          sed -i 's/^EXTRAVERSION =.*/EXTRAVERSION = -edison-acpi-preempt-rt/' Makefile
-          # Neutralize setlocalversion completely - EXTRAVERSION handles it
+          VER="6.12.3-edison-acpi-preempt-rt"
+
+          # 1. Neutralize setlocalversion (no git suffix)
           printf '#!/bin/sh\n' > scripts/setlocalversion
           chmod +x scripts/setlocalversion
-          echo "=== Makefile EXTRAVERSION ==="
-          grep EXTRAVERSION Makefile
-          echo "=== setlocalversion ==="
-          cat scripts/setlocalversion
 
-      - name: Prepare kernel config (matching Edison exactly)
+          # 2. Set EXTRAVERSION in Makefile so KERNELRELEASE is correct
+          sed -i "s/^EXTRAVERSION =.*/EXTRAVERSION = -edison-acpi-preempt-rt/" Makefile
+
+          # 3. Hardcode vermagic string directly
+          sed -i 's/#define VERMAGIC_STRING .*/#define VERMAGIC_STRING "6.12.3-edison-acpi-preempt-rt SMP preempt_rt mod_unload "/' include/linux/vermagic.h
+
+          echo "=== vermagic.h ==="
+          grep VERMAGIC_STRING include/linux/vermagic.h
+          echo "=== Makefile EXTRAVERSION ==="
+          grep EXTRAVERSION Makefile | head -1
+
+      - name: Prepare kernel config
         run: |
           cd ~/linux-source
           CFG_DIR="$GITHUB_WORKSPACE/upstream-edison/meta-intel-edison-bsp/recipes-kernel/linux/files"
-
           make defconfig
-
           MERGE_CFG=/tmp/edison-all.cfg
           cat /dev/null > $MERGE_CFG
           for cfg in \
@@ -114,31 +115,15 @@ jobs:
               echo "WARNING: $cfg not found"
             fi
           done
-
           scripts/kconfig/merge_config.sh -m .config $MERGE_CFG 2>&1 | tail -30
-
           scripts/config --enable  CONFIG_SND_USB
           scripts/config --module  CONFIG_SND_USB_AUDIO
           scripts/config --module  CONFIG_SND_HWDEP
           scripts/config --module  CONFIG_SND_RAWMIDI
-
-          # Do NOT set CONFIG_LOCALVERSION - EXTRAVERSION handles it
           scripts/config --unset CONFIG_LOCALVERSION
           scripts/config --disable  CONFIG_LOCALVERSION_AUTO
-
           yes '' | make oldconfig 2>&1 | tail -10
-
-          echo "=== Key configs ==="
-          grep -E 'CONFIG_SND_USB_AUDIO=|CONFIG_LOCALVERSION=' .config || echo "LOCALVERSION unset (good)"
-
-      - name: Verify version before build
-        run: |
-          cd ~/linux-source
-          make modules_prepare 2>&1 | tail -3
-          echo "=== kernel.release ==="
-          cat include/config/kernel.release
-          echo "=== utsrelease.h ==="
-          grep UTS_RELEASE include/generated/utsrelease.h
+          grep -E 'CONFIG_SND_USB_AUDIO=|CONFIG_LOCALVERSION' .config || echo "LOCALVERSION unset"
 
       - name: Build kernel and modules
         run: |
@@ -148,45 +133,38 @@ jobs:
       - name: Verify and collect modules
         run: |
           cd ~/linux-source
-          echo "=== Module vermagic ==="
           KOS=$(find . -name '*.ko' | grep -E 'snd-usb-audio|snd-usbmidi-lib|snd-hwdep|snd-rawmidi')
           if [ -z "$KOS" ]; then
             echo "FATAL: No .ko files found"
             exit 1
           fi
+          echo "=== Module vermagic ==="
           for ko in $KOS; do
-            echo "--- $ko ---"
-            modinfo "$ko" 2>/dev/null | grep -E 'vermagic|depends'
+            modinfo "$ko" 2>/dev/null | grep vermagic
           done
 
-      - name: Package modules
+      - name: Package and upload
         run: |
           mkdir -p output/modules
           cd ~/linux-source
           find . -name '*.ko' | grep -E 'snd-usb-audio|snd-usbmidi-lib|snd-hwdep|snd-rawmidi' | while read ko; do
             cp -v "$ko" $GITHUB_WORKSPACE/output/modules/
           done
-          ls -la $GITHUB_WORKSPACE/output/modules/
-
-      - name: Create install script
-        run: |
           cat > output/install_on_edison.sh << 'SCRIPT'
           #!/bin/bash
           set -e
           KVER="6.12.3-edison-acpi-preempt-rt"
-          SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
           MODDIR="/lib/modules/$KVER/extra"
           mkdir -p "$MODDIR"
-          cp -v "$SCRIPT_DIR/modules/"*.ko "$MODDIR/"
+          cp -v "$(dirname $0)/modules/"*.ko "$MODDIR/"
           depmod -a "$KVER"
-          modprobe snd-rawmidi
-          modprobe snd-hwdep
-          modprobe snd-usb-audio
-          echo "Module loaded. Check: aplay -l"
+          modprobe snd-hwdep && modprobe snd-rawmidi && modprobe snd-usb-audio
+          echo "Done. Check: aplay -l"
           SCRIPT
           chmod +x output/install_on_edison.sh
+          ls -la output/modules/
 
-      - name: Upload modules artifact
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: snd-usb-audio-modules-v6.12.3
