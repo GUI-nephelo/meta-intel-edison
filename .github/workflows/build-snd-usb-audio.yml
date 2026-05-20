@@ -37,25 +37,24 @@ jobs:
             https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git \
             ~/linux-source
 
-      - name: Hardcode vermagic and kernel version
+      - name: Patch kernel for Edison
         run: |
           cd ~/linux-source
-          VER="6.12.3-edison-acpi-preempt-rt"
 
-          # 1. Neutralize setlocalversion (no git suffix)
+          # 1. No-op setlocalversion to prevent git suffix
           printf '#!/bin/sh\n' > scripts/setlocalversion
           chmod +x scripts/setlocalversion
 
-          # 2. Set EXTRAVERSION in Makefile so KERNELRELEASE is correct
-          sed -i "s/^EXTRAVERSION =.*/EXTRAVERSION = -edison-acpi-preempt-rt/" Makefile
-
-          # 3. Hardcode vermagic string directly
+          # 2. Hardcode vermagic string to exactly match Edison kernel
           sed -i 's/#define VERMAGIC_STRING .*/#define VERMAGIC_STRING "6.12.3-edison-acpi-preempt-rt SMP preempt_rt mod_unload "/' include/linux/vermagic.h
+
+          # 3. Force kernel.release to match Edison
+          echo "6.12.3-edison-acpi-preempt-rt" > include/config/kernel.release
 
           echo "=== vermagic.h ==="
           grep VERMAGIC_STRING include/linux/vermagic.h
-          echo "=== Makefile EXTRAVERSION ==="
-          grep EXTRAVERSION Makefile | head -1
+          echo "=== kernel.release ==="
+          cat include/config/kernel.release
 
       - name: Prepare kernel config
         run: |
@@ -120,15 +119,18 @@ jobs:
           scripts/config --module  CONFIG_SND_USB_AUDIO
           scripts/config --module  CONFIG_SND_HWDEP
           scripts/config --module  CONFIG_SND_RAWMIDI
-          scripts/config --unset CONFIG_LOCALVERSION
-          scripts/config --disable  CONFIG_LOCALVERSION_AUTO
+          scripts/config --unset   CONFIG_LOCALVERSION
+          scripts/config --disable CONFIG_LOCALVERSION_AUTO
           yes '' | make oldconfig 2>&1 | tail -10
-          grep -E 'CONFIG_SND_USB_AUDIO=|CONFIG_LOCALVERSION' .config || echo "LOCALVERSION unset"
+          echo "=== Final SND_USB_AUDIO ==="
+          grep CONFIG_SND_USB_AUDIO .config
+          echo "=== LOCALVERSION ==="
+          grep CONFIG_LOCALVERSION .config || echo "(unset)"
 
-      - name: Build kernel and modules
+      - name: Build modules
         run: |
           cd ~/linux-source
-          make -j$(nproc) 2>&1 | tail -10
+          make -j$(nproc) modules 2>&1 | tail -20
 
       - name: Verify and collect modules
         run: |
@@ -141,6 +143,10 @@ jobs:
           echo "=== Module vermagic ==="
           for ko in $KOS; do
             modinfo "$ko" 2>/dev/null | grep vermagic
+          done
+          echo "=== Module depends ==="
+          for ko in $KOS; do
+            modinfo "$ko" 2>/dev/null | grep depends
           done
 
       - name: Package and upload
