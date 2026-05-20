@@ -58,7 +58,7 @@ jobs:
             0009-disable-i915-DRM.cfg \
             0010-enable-X86_INTEL_MID.cfg \
             0011-enable-INPUT_SOC_BUTTON_ARRAY.cfg \
-            0012-enable-I2C_HID-and-HID_MULTITOUCH.cfg \
+            0012-enable-I2C-HID-and-HID_MULTITOUCH.cfg \
             0013-DEBUG_SHIRQ-DEBUG_LOCKDEP.cfg \
             0014-enable-ACPI_DEBUG-and-ACPI_PROCFS_POWER.cfg \
             0015-enable-ACPI_TABLE_UPGRADE.cfg \
@@ -112,49 +112,63 @@ jobs:
           yes '' | make oldconfig 2>&1 | tail -10
 
           echo "=== Key configs ==="
-          grep -E 'CONFIG_SND_USB_AUDIO=|CONFIG_SND_HWDEP=|CONFIG_SND_RAWMIDI=|CONFIG_SND_PCM=|CONFIG_SND=|CONFIG_LOCALVERSION=' .config
+          grep -E 'CONFIG_SND_USB_AUDIO=|CONFIG_SND_HWDEP=|CONFIG_SND_RAWMIDI=|CONFIG_LOCALVERSION=' .config
 
           if ! grep -q 'CONFIG_SND_USB_AUDIO=m' .config; then
             echo "FATAL: SND_USB_AUDIO not =m"
             exit 1
           fi
 
-      - name: Fix version and prepare for build
+      - name: Fix setlocalversion and build
         run: |
           cd ~/linux-source
-          KVER="6.12.3-edison-acpi-preempt-rt"
 
-          # Neutralize setlocalversion to prevent + or -dirty suffix
-          printf '#!/bin/sh\n' > scripts/setlocalversion
+          # CRITICAL: setlocalversion reads CONFIG_LOCALVERSION from .config AND
+          # appends git-derived suffixes. On shallow clones it may add unwanted
+          # suffixes. Replace it with a version that ONLY outputs CONFIG_LOCALVERSION
+          # and skips all git detection.
+          cat > scripts/setlocalversion << 'SETEOF'
+          #!/bin/sh
+          # Only output CONFIG_LOCALVERSION, skip all git-derived versioning
+          # This prevents -dirty or + suffixes on shallow clones
+          if test -e .config; then
+            CONFIG_LOCALVERSION=$(sed -n 's/^CONFIG_LOCALVERSION="\(.*\)"/\1/p' .config)
+            if test -n "$CONFIG_LOCALVERSION"; then
+              printf '%s' "$CONFIG_LOCALVERSION"
+            fi
+          fi
+          SETEOF
           chmod +x scripts/setlocalversion
+          echo "=== Custom setlocalversion ==="
+          cat scripts/setlocalversion
+          echo ""
+          echo "=== Testing setlocalversion output ==="
+          sh scripts/setlocalversion
+          echo ""
 
-          # Force the correct kernel release string
-          echo "$KVER" > include/config/kernel.release
-
-          # Run modules_prepare to generate required headers
-          make modules_prepare 2>&1 | tail -5
-
-          # Verify the version that will be used
-          echo "=== kernel.release ==="
-          cat include/config/kernel.release
-          echo "=== generated utsrelease ==="
-          grep UTS_RELEASE include/generated/utsrelease.h
-          echo "=== LOCALVERSION ==="
-          grep CONFIG_LOCALVERSION .config
-
-      - name: Build kernel and modules
-        run: |
-          cd ~/linux-source
+          # Build full kernel + modules
           make -j$(nproc) 2>&1 | tail -10
 
       - name: Verify vermagic and collect modules
         run: |
           cd ~/linux-source
-          echo "=== Expected vermagic: 6.12.3-edison-acpi-preempt-rt SMP preempt_rt mod_unload ==="
+          echo "=== kernel.release ==="
+          cat include/config/kernel.release
+          echo "=== utsrelease ==="
+          grep UTS_RELEASE include/generated/utsrelease.h
+          echo ""
+          echo "=== Module vermagic ==="
           find . -name 'snd-rawmidi.ko' -exec modinfo {} \; 2>/dev/null | grep vermagic
           find . -name 'snd-usb-audio.ko' -exec modinfo {} \; 2>/dev/null | grep vermagic
           find . -name 'snd-hwdep.ko' -exec modinfo {} \; 2>/dev/null | grep vermagic
           find . -name 'snd-usbmidi-lib.ko' -exec modinfo {} \; 2>/dev/null | grep vermagic
+
+          # Hard fail if vermagic doesn't include version
+          FIRST_KO=$(find . -name 'snd-hwdep.ko' | head -1)
+          if ! modinfo "$FIRST_KO" 2>/dev/null | grep -q '6.12.3-edison-acpi'; then
+            echo "FATAL: vermagic missing version prefix!"
+            exit 1
+          fi
 
           KOS=$(find . -name '*.ko' | grep -E 'snd-usb-audio|snd-usbmidi-lib|snd-hwdep|snd-rawmidi')
           if [ -z "$KOS" ]; then
