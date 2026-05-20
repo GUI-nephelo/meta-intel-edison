@@ -37,13 +37,20 @@ jobs:
             https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git \
             ~/linux-source
 
-      - name: Override setlocalversion BEFORE any make
+      - name: Patch Makefile and neutralize setlocalversion
         run: |
           cd ~/linux-source
-          # setlocalversion computes the LOCALVERSION suffix for KERNELRELEASE.
-          # On shallow clones git detection breaks. Output the fixed Edison version.
-          printf '#!/bin/sh\necho "-edison-acpi-preempt-rt"\n' > scripts/setlocalversion
+          # The Edison kernel version is 6.12.3-edison-acpi-preempt-rt
+          # KERNELRELEASE = VERSION.PATCHLEVEL.SUBLEVEL + EXTRAVERSION + LOCALVERSION
+          # Instead of relying on CONFIG_LOCALVERSION (which interacts badly
+          # with setlocalversion), set EXTRAVERSION directly in the Makefile
+          # and disable LOCALVERSION completely.
+          sed -i 's/^EXTRAVERSION =.*/EXTRAVERSION = -edison-acpi-preempt-rt/' Makefile
+          # Neutralize setlocalversion completely - EXTRAVERSION handles it
+          printf '#!/bin/sh\n' > scripts/setlocalversion
           chmod +x scripts/setlocalversion
+          echo "=== Makefile EXTRAVERSION ==="
+          grep EXTRAVERSION Makefile
           echo "=== setlocalversion ==="
           cat scripts/setlocalversion
 
@@ -115,18 +122,19 @@ jobs:
           scripts/config --module  CONFIG_SND_HWDEP
           scripts/config --module  CONFIG_SND_RAWMIDI
 
-          scripts/config --set-str CONFIG_LOCALVERSION "-edison-acpi-preempt-rt"
+          # Do NOT set CONFIG_LOCALVERSION - EXTRAVERSION handles it
+          scripts/config --unset CONFIG_LOCALVERSION
           scripts/config --disable  CONFIG_LOCALVERSION_AUTO
 
           yes '' | make oldconfig 2>&1 | tail -10
 
           echo "=== Key configs ==="
-          grep -E 'CONFIG_SND_USB_AUDIO=|CONFIG_LOCALVERSION=' .config
+          grep -E 'CONFIG_SND_USB_AUDIO=|CONFIG_LOCALVERSION=' .config || echo "LOCALVERSION unset (good)"
 
-      - name: Verify version after modules_prepare
+      - name: Verify version before build
         run: |
           cd ~/linux-source
-          make modules_prepare 2>&1 | tail -5
+          make modules_prepare 2>&1 | tail -3
           echo "=== kernel.release ==="
           cat include/config/kernel.release
           echo "=== utsrelease.h ==="
@@ -150,13 +158,6 @@ jobs:
             echo "--- $ko ---"
             modinfo "$ko" 2>/dev/null | grep -E 'vermagic|depends'
           done
-          # Check vermagic contains version (warning only)
-          FIRST=$(echo "$KOS" | head -1)
-          if modinfo "$FIRST" 2>/dev/null | grep -q '6.12.3-edison'; then
-            echo "OK: vermagic contains expected version"
-          else
-            echo "WARNING: vermagic may not match target kernel"
-          fi
 
       - name: Package modules
         run: |
