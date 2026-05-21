@@ -1,4 +1,4 @@
-name: Build snd-usb-audio module for Edison
+name: Build snd-usb-audio for Edison (v3 - robust)
 
 on:
   push:
@@ -15,160 +15,183 @@ jobs:
   build:
     runs-on: ubuntu-latest
     timeout-minutes: 120
-    env:
-      KVER: "6.12.3-edison-acpi-preempt-rt"
 
     steps:
-      - name: Checkout repository (this fork)
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Checkout upstream meta-intel-edison (for .cfg files)
-        uses: actions/checkout@v4
-        with:
-          repository: edison-fw/meta-intel-edison
-          ref: master
-          path: upstream-edison
-          sparse-checkout: |
-            meta-intel-edison-bsp/recipes-kernel/linux/files
-
-      - name: Install build dependencies
-        run: sudo apt-get update && sudo apt-get install -y flex bison libelf-dev libssl-dev bc build-essential libncurses-dev libncurses5 libncursesw5 git ccache
-
-      - name: Clone Linux kernel source v6.12.3
+      - name: Install dependencies (with retries)
         run: |
-          git clone --depth 1 --branch v6.12.3 https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git ~/linux-source
-
-      - name: Patch kernel to match Edison LOCALVERSION/vermagic
-        run: |
-          cd ~/linux-source
-          # Ensure setlocalversion prints the exact LOCALVERSION used by Edison builds
-          printf '#!/bin/sh\necho "${KVER}"\n' > scripts/setlocalversion
-          chmod +x scripts/setlocalversion
-          # Overwrite vermagic string to match final module vermagic (use $KVER)
-          sed -i "s/#define VERMAGIC_STRING .*/#define VERMAGIC_STRING \"${KVER} SMP preempt_rt mod_unload \"/" include/linux/vermagic.h || true
-          echo '=== setlocalversion ==='
-          cat scripts/setlocalversion || true
-          echo '=== vermagic.h ==='
-          grep VERMAGIC_STRING include/linux/vermagic.h || true
-
-      - name: Prepare kernel config (merge Edison .cfg + enable audio modules)
-        run: |
-          cd ~/linux-source
-          CFG_DIR="$GITHUB_WORKSPACE/upstream-edison/meta-intel-edison-bsp/recipes-kernel/linux/files"
-          make defconfig
-          MERGE_CFG=/tmp/edison-all.cfg
-          : > $MERGE_CFG
-          for cfg in \
-            0001-enable-to-build-a-netboot-image.cfg \
-            0002-enable-x2APIC.cfg \
-            0003-enable-NETCONSOLE_DYNAMIC.cfg \
-            0004-enable-STMMAC.cfg \
-            0005-enable-IGB.cfg \
-            0006-enable-IXGBE.cfg \
-            0007-enable-USB_RTL8152.cfg \
-            0008-disable-HPET.cfg \
-            0009-disable-i915-DRM.cfg \
-            0010-enable-X86_INTEL_MID.cfg \
-            0011-enable-INPUT_SOC_BUTTON_ARRAY.cfg \
-            0012-enable-I2C-HID-and-HID_MULTITOUCH.cfg \
-            0013-DEBUG_SHIRQ-DEBUG_LOCKDEP.cfg \
-            0014-enable-ACPI_DEBUG-and-ACPI_PROCFS_POWER.cfg \
-            0015-enable-ACPI_TABLE_UPGRADE.cfg \
-            0016-enable-X86_INTEL_LPSS-and-LPSS-drivers.cfg \
-            0017-enable-MFD_INTEL_LPSS-drivers.cfg \
-            0018-enable-INTEL_IDMA64-iDMA-64-bit.cfg \
-            0020-enable-SPI_DW.cfg \
-            0021-disable-HDA-audio.cfg \
-            0022-enable-Intel-Quark-devices.cfg \
-            0023-enable-DEBUG_GPIO.cfg \
-            0024-enable-GPIO_DWAPB.cfg \
-            0025-enable-GPIO_PCA953X.cfg \
-            0029-enable-INTEL_IDLE.cfg \
-            0030-enable-PUNIT_ATOM_DEBUG.cfg \
-            0031-enable-REGULATOR.cfg \
-            0032-enable-BRCMFMAC.cfg \
-            0033-enable-BT_HCIUART_BCM.cfg \
-            0034-enable-ADS7950.cfg \
-            0035-enable-ACPI_CONFIGFS.cfg \
-            0036-enable-SND_SST_ATOM_HIFI2_PLATFORM.cfg \
-            0037-enable-SND_SOC_SOF-nocodec.cfg \
-            0038-enable-PHY_TUSB1210.cfg \
-            0039-enable-USB_CONFIGFS.cfg \
-            0040-enable-INTEL_MRFLD_ADC.cfg \
-            0041-enable-EXTCON_INTEL_MRFLD.cfg \
-            0042-disable-LOCALVERSION_AUTO.cfg \
-            preempt.cfg sof_nocodec.cfg audio.cfg;
-          do
-            if [ -f "$CFG_DIR/$cfg" ]; then
-              cat "$CFG_DIR/$cfg" >> $MERGE_CFG
-              echo "" >> $MERGE_CFG
-            else
-              echo "WARNING: $cfg not found"
+          set -e
+          for i in {1..3}; do
+            echo "Attempt $i to install dependencies..."
+            if sudo apt-get update && sudo apt-get install -y \
+              build-essential flex bison libelf-dev libssl-dev bc \
+              libncurses-dev libncurses5 libncursesw5 wget; then
+              echo "Success"
+              break
             fi
+            sleep 5
           done
-          scripts/kconfig/merge_config.sh -m .config $MERGE_CFG || true
-          # Ensure ALSA USB and dependencies built as modules
-          scripts/config --enable CONFIG_SND_USB
-          scripts/config --module CONFIG_SND_USB_AUDIO
-          scripts/config --module CONFIG_SND_HWDEP
-          scripts/config --module CONFIG_SND_RAWMIDI
-          scripts/config --set-str CONFIG_LOCALVERSION "${KVER}"
-          scripts/config --disable CONFIG_LOCALVERSION_AUTO
-          yes '' | make oldconfig || true
-          echo "=== Key configs ==="
-          grep -E 'CONFIG_SND_USB_AUDIO=|CONFIG_LOCALVERSION=' .config || true
 
-      - name: Prepare modules build (modules_prepare)
+      - name: Download kernel source
         run: |
-          cd ~/linux-source
-          make modules_prepare
-          echo "=== kernel.release ==="
-          cat include/config/kernel.release || true
-          echo "=== vermagic.h ==="
-          grep VERMAGIC_STRING include/linux/vermagic.h || true
+          cd /tmp
+          echo "Downloading linux-6.12.3..."
+          wget -q https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.12.3.tar.xz
+          tar -xf linux-6.12.3.tar.xz
+          cd linux-6.12.3
+          ls -la | head -10
 
-      - name: Build full kernel + modules (parallel)
+      - name: Configure for audio modules
         run: |
-          cd ~/linux-source
-          # build full kernel ensures module build uses correct headers/objects
-          make -j$(nproc) 2>&1 | tail -n 20
+          cd /tmp/linux-6.12.3
+          
+          # Start with defconfig
+          make defconfig >/dev/null 2>&1
+          
+          # Add Edison-specific settings
+          cat >> .config << 'EOF'
+CONFIG_SND=y
+CONFIG_SND_USB=y
+CONFIG_SND_USB_AUDIO=m
+CONFIG_SND_HWDEP=m
+CONFIG_SND_RAWMIDI=m
+CONFIG_LOCALVERSION="-edison-acpi-preempt-rt"
+# CONFIG_LOCALVERSION_AUTO is not set
+EOF
+          
+          # Normalize config
+          make oldconfig < /dev/null >/dev/null 2>&1
+          
+          echo "=== Audio Config ==="
+          grep -E "CONFIG_SND_USB_AUDIO|CONFIG_LOCALVERSION" .config
 
-      - name: Verify and collect modules
+      - name: Build kernel and modules
         run: |
-          cd ~/linux-source
-          KOS=$(find . -name '*.ko' | grep -E 'snd-usb-audio|snd-usbmidi-lib|snd-hwdep|snd-rawmidi' || true)
-          if [ -z "$KOS" ]; then
-            echo "FATAL: No .ko files found"
+          cd /tmp/linux-6.12.3
+          echo "Starting build with $(nproc) CPUs..."
+          time make -j$(nproc) 2>&1 | tee build.log | tail -30
+          
+          if [ -f vmlinux ]; then
+            echo "✓ Kernel built successfully"
+          else
+            echo "✗ Kernel build failed!"
+            tail -50 build.log
             exit 1
           fi
-          echo "=== Module vermagic & depends ==="
-          for ko in $KOS; do
-            modinfo "$ko" 2>/dev/null | grep -E 'vermagic|depends' || true
-          done
-          mkdir -p $GITHUB_WORKSPACE/output/modules
-          find . -name '*.ko' | grep -E 'snd-usb-audio|snd-usbmidi-lib|snd-hwdep|snd-rawmidi' | while read ko; do
-            cp -v "$ko" $GITHUB_WORKSPACE/output/modules/
-          done
 
-      - name: Create install script and list artifacts
+      - name: Locate modules
         run: |
-          cat > $GITHUB_WORKSPACE/output/install_on_edison.sh << SCRIPT
-#!/bin/bash
-set -e
-KVER="${KVER}"
-MODDIR="/lib/modules/$KVER/extra"
-mkdir -p "$MODDIR"
-cp -v "$(dirname "$0")/modules/"*.ko "$MODDIR/"
-depmod -a "$KVER"
-modprobe snd-hwdep && modprobe snd-rawmidi && modprobe snd-usb-audio || true
-echo "Done. Check: aplay -l"
-SCRIPT
-          chmod +x $GITHUB_WORKSPACE/output/install_on_edison.sh
-          ls -la $GITHUB_WORKSPACE/output/modules || true
+          cd /tmp/linux-6.12.3
+          
+          echo "=== Searching for modules ==="
+          MODULES_COUNT=$(find . -name "*.ko" | wc -l)
+          echo "Total .ko files found: $MODULES_COUNT"
+          
+          TARGET_MODULES=(
+            "snd-usb-audio.ko"
+            "snd-hwdep.ko"
+            "snd-rawmidi.ko"
+            "snd-usbmidi-lib.ko"
+          )
+          
+          FOUND_ALL=1
+          for target in "${TARGET_MODULES[@]}"; do
+            FOUND=$(find . -name "$target" 2>/dev/null)
+            if [ -z "$FOUND" ]; then
+              echo "✗ Missing: $target"
+              FOUND_ALL=0
+            else
+              echo "✓ Found: $target"
+              echo "  Path: $FOUND"
+            fi
+          done
+          
+          if [ $FOUND_ALL -eq 0 ]; then
+            echo ""
+            echo "Listing all snd*.ko files found:"
+            find . -name "snd*.ko" 2>/dev/null | head -20
+            exit 1
+          fi
 
-      - name: Upload artifact
+      - name: Copy modules
+        run: |
+          mkdir -p ${{ github.workspace }}/modules
+          cd /tmp/linux-6.12.3
+          
+          for target in snd-usb-audio.ko snd-hwdep.ko snd-rawmidi.ko snd-usbmidi-lib.ko; do
+            FOUND=$(find . -name "$target" 2>/dev/null | head -1)
+            if [ -n "$FOUND" ]; then
+              cp "$FOUND" ${{ github.workspace }}/modules/
+              echo "Copied: $(basename $FOUND)"
+            fi
+          done
+          
+          echo ""
+          echo "=== Modules ready for packaging ==="
+          ls -lh ${{ github.workspace }}/modules/
+
+      - name: Verify module metadata
+        run: |
+          echo "=== Module Information ==="
+          for ko in ${{ github.workspace }}/modules/*.ko; do
+            if [ -f "$ko" ]; then
+              echo ""
+              echo "File: $(basename $ko)"
+              echo "Size: $(stat -c %s $ko 2>/dev/null || stat -f %z $ko 2>/dev/null) bytes"
+              
+              # Try modinfo if available
+              if modinfo "$ko" >/dev/null 2>&1; then
+                modinfo "$ko" | grep -E "^(filename|vermagic|depends):" | head -3
+              else
+                file "$ko"
+              fi
+            fi
+          done
+
+      - name: Create install script
+        run: |
+          mkdir -p ${{ github.workspace }}/output
+          cp ${{ github.workspace }}/modules/*.ko ${{ github.workspace }}/output/
+          
+          cat > ${{ github.workspace }}/output/INSTALL.sh << 'INSTALL_SCRIPT'
+#!/bin/bash
+# Installation script for Edison snd-usb-audio modules
+set -e
+
+KVER="6.12.3-edison-acpi-preempt-rt"
+MODDIR="/lib/modules/$KVER/extra"
+
+echo "Installing modules for kernel: $KVER"
+mkdir -p "$MODDIR"
+
+for ko in $(dirname $0)/*.ko; do
+  if [ -f "$ko" ]; then
+    echo "Installing: $(basename $ko)"
+    cp "$ko" "$MODDIR/"
+  fi
+done
+
+echo "Running depmod..."
+depmod -a "$KVER"
+
+echo "Installation complete!"
+echo "To load modules:"
+echo "  modprobe snd-hwdep"
+echo "  modprobe snd-rawmidi"  
+echo "  modprobe snd-usb-audio"
+INSTALL_SCRIPT
+          
+          chmod +x ${{ github.workspace }}/output/INSTALL.sh
+
+      - name: List artifacts
+        run: |
+          echo "=== Artifacts to upload ==="
+          ls -lah ${{ github.workspace }}/output/
+
+      - name: Upload artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: snd-usb-audio-modules-v6.12.3
+          name: snd-usb-audio-edison-6.12.3
           path: output/
           retention-days: 90
