@@ -15,63 +15,137 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Check pre-installed tools
+        run: |
+          echo "=== Compiler versions ==="
+          gcc --version | head -1
+          make --version | head -1
+          echo "=== Checking for required tools ==="
+          which flex bison || echo "flex/bison not found"
+          which ld ar nm || echo "GNU tools missing"
+
       - name: Download kernel
-        shell: bash
         run: |
           cd /tmp
-          curl -L https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.12.3.tar.xz | tar -xJ
-          cd linux-6.12.3
-          echo "=== Kernel structure ==="
-          ls -d ./* | head -10
+          echo "Downloading kernel..."
+          curl -L -o linux-6.12.3.tar.xz https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.12.3.tar.xz
+          tar -xf linux-6.12.3.tar.xz
 
-      - name: Configure for Edison
-        shell: bash
+      - name: Setup build environment
+        run: |
+          # Try to install missing dependencies if apt is available
+          if command -v apt-get &> /dev/null; then
+            echo "Installing build dependencies..."
+            sudo apt-get update -qq || true
+            sudo apt-get install -y flex bison libelf-dev libssl-dev bc || true
+          fi
+          
+          # Check what we have
+          echo "=== Final tool check ==="
+          which gcc make flex bison ld ar
+          ls -la /usr/include/libelf.h 2>/dev/null || echo "libelf.h not found"
+          ls -la /usr/include/openssl/opensslv.h 2>/dev/null || echo "openssl headers not found"
+
+      - name: Configure kernel
         run: |
           cd /tmp/linux-6.12.3
           
-          # Basic config
+          # Base config
+          echo "Running make defconfig..."
           make defconfig >/dev/null 2>&1
           
-          # Audio setup
-          echo 'CONFIG_SND=y' >> .config
-          echo 'CONFIG_SND_USB=y' >> .config
-          echo 'CONFIG_SND_USB_AUDIO=m' >> .config
-          echo 'CONFIG_SND_HWDEP=m' >> .config
-          echo 'CONFIG_SND_RAWMIDI=m' >> .config
-          echo 'CONFIG_LOCALVERSION="-edison-acpi-preempt-rt"' >> .config
-          echo '# CONFIG_LOCALVERSION_AUTO is not set' >> .config
+          # Add Edison settings
+          cat >> .config << 'EOF'
+CONFIG_SND=y
+CONFIG_SND_USB=y
+CONFIG_SND_USB_AUDIO=m
+CONFIG_SND_HWDEP=m
+CONFIG_SND_RAWMIDI=m
+CONFIG_LOCALVERSION="-edison-acpi-preempt-rt"
+# CONFIG_LOCALVERSION_AUTO is not set
+EOF
           
           # Apply config
-          yes | make oldconfig >/dev/null 2>&1 || true
+          echo "Running make oldconfig..."
+          yes | make oldconfig >/dev/null 2>&1
           
-          # Verify
-          echo "Config check:"
-          grep "CONFIG_SND_USB_AUDIO\|CONFIG_LOCALVERSION" .config
+          echo "=== Configuration Summary ==="
+          echo "Audio modules:"
+          grep "CONFIG_SND_USB_AUDIO\|CONFIG_SND_HWDEP\|CONFIG_SND_RAWMIDI" .config
+          echo ""
+          echo "Local version:"
+          grep "CONFIG_LOCALVERSION" .config
 
-      - name: Build kernel
-        shell: bash
+      - name: Build kernel (with diagnostics)
         run: |
           cd /tmp/linux-6.12.3
-          # Use minimal CPU to avoid timeout
-          make -j2 2>&1 | tail -100
+          
+          echo "=== Build environment ===" 
+          echo "CPUs: $(nproc)"
+          df -h /tmp
+          
+          echo ""
+          echo "=== Starting kernel build ===" 
+          echo "Using 2 parallel jobs to avoid resource issues..."
+          
+          # Build with diagnostic output
+          make -j2 V=0 2>&1 | tee /tmp/build.log | \
+            grep -E "^(  CC|  AS|  LD|Makefile|error|warning:|undefined)" | \
+            head -100
+          
+          echo ""
+          echo "=== Build completion check ==="
+          if [ -f vmlinux ]; then
+            echo "✓ Kernel built successfully"
+            ls -lh vmlinux
+          else
+            echo "✗ vmlinux not found - build may have failed"
+            echo ""
+            echo "Last 50 lines of build log:"
+            tail -50 /tmp/build.log
+            exit 1
+          fi
 
-      - name: Package modules
-        shell: bash
+      - name: Find compiled modules
+        run: |
+          cd /tmp/linux-6.12.3
+          
+          echo "=== Searching for audio modules ==="
+          FOUND=0
+          
+          for mod in snd-usb-audio snd-hwdep snd-rawmidi snd-usbmidi-lib; do
+            result=$(find . -name "${mod}.ko" 2>/dev/null)
+            if [ -n "$result" ]; then
+              echo "✓ Found ${mod}.ko"
+              FOUND=$((FOUND + 1))
+            else
+              echo "✗ Missing ${mod}.ko"
+            fi
+          done
+          
+          if [ $FOUND -eq 0 ]; then
+            echo ""
+            echo "ERROR: No audio modules found!"
+            echo "Total .ko files in build: $(find . -name "*.ko" 2>/dev/null | wc -l)"
+            exit 1
+          fi
+
+      - name: Collect modules
         run: |
           mkdir -p output
           cd /tmp/linux-6.12.3
           
-          # Find and copy
-          find . -name 'snd-usb-audio.ko' -exec cp {} output/ \;
-          find . -name 'snd-hwdep.ko' -exec cp {} output/ \;
-          find . -name 'snd-rawmidi.ko' -exec cp {} output/ \;
-          find . -name 'snd-usbmidi-lib.ko' -exec cp {} output/ \;
+          echo "=== Copying modules ==="
+          for mod in snd-usb-audio.ko snd-hwdep.ko snd-rawmidi.ko snd-usbmidi-lib.ko; do
+            find . -name "$mod" -exec cp {} output/ \; 2>/dev/null && echo "Copied $mod" || true
+          done
           
-          echo "Output:"
+          echo ""
+          echo "=== Final artifact list ==="
           ls -lah output/
 
-      - name: Upload
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: snd-usb-audio-edison
+          name: snd-usb-audio-edison-6.12.3
           path: output/
