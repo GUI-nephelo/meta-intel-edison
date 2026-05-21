@@ -15,111 +15,63 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Check pre-installed tools
-        run: |
-          echo "=== System Information ==="
-          uname -a
-          echo "=== Pre-installed compilers ==="
-          which gcc g++ make || echo "gcc not found"
-          gcc --version | head -1
-          echo "=== Python ==="
-          which python3
-
-      - name: Download kernel source via curl/wget
+      - name: Download kernel
+        shell: bash
         run: |
           cd /tmp
-          echo "Downloading Linux kernel v6.12.3..."
-          which curl >/dev/null && curl -L -O https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.12.3.tar.xz || \
-          wget https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.12.3.tar.xz
-          tar -xf linux-6.12.3.tar.xz
+          curl -L https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.12.3.tar.xz | tar -xJ
           cd linux-6.12.3
-          ls -la | head -10
+          echo "=== Kernel structure ==="
+          ls -d ./* | head -10
 
-      - name: Configure kernel for Edison
+      - name: Configure for Edison
+        shell: bash
         run: |
           cd /tmp/linux-6.12.3
           
-          # Set up base configuration
-          make defconfig
+          # Basic config
+          make defconfig >/dev/null 2>&1
           
-          # Append audio configurations
-          cat >> .config << 'END_CONFIG'
-CONFIG_SND=y
-CONFIG_SND_USB=y
-CONFIG_SND_USB_AUDIO=m
-CONFIG_SND_HWDEP=m
-CONFIG_SND_RAWMIDI=m
-CONFIG_LOCALVERSION="-edison-acpi-preempt-rt"
-# CONFIG_LOCALVERSION_AUTO is not set
-END_CONFIG
+          # Audio setup
+          echo 'CONFIG_SND=y' >> .config
+          echo 'CONFIG_SND_USB=y' >> .config
+          echo 'CONFIG_SND_USB_AUDIO=m' >> .config
+          echo 'CONFIG_SND_HWDEP=m' >> .config
+          echo 'CONFIG_SND_RAWMIDI=m' >> .config
+          echo 'CONFIG_LOCALVERSION="-edison-acpi-preempt-rt"' >> .config
+          echo '# CONFIG_LOCALVERSION_AUTO is not set' >> .config
           
-          # Make oldconfig without prompting
-          yes | make oldconfig || true
+          # Apply config
+          yes | make oldconfig >/dev/null 2>&1 || true
           
-          # Verify key configurations
-          echo "=== Kernel Configuration ==="
-          grep -E "^CONFIG_SND_USB|^CONFIG_LOCALVERSION" .config | sort
+          # Verify
+          echo "Config check:"
+          grep "CONFIG_SND_USB_AUDIO\|CONFIG_LOCALVERSION" .config
 
       - name: Build kernel
+        shell: bash
         run: |
           cd /tmp/linux-6.12.3
-          echo "Starting build..."
-          ncpus=$(($(nproc) - 1))
-          echo "Using $ncpus CPU cores"
-          timeout 120m make -j$ncpus 2>&1 | head -100
-          echo "..."
-          timeout 120m make -j$ncpus 2>&1 | tail -50
+          # Use minimal CPU to avoid timeout
+          make -j2 2>&1 | tail -100
 
-      - name: List compiled modules
+      - name: Package modules
+        shell: bash
         run: |
-          cd /tmp/linux-6.12.3
-          echo "=== Searching for audio modules ==="
-          find . -name "snd-usb-audio.ko" 2>/dev/null | head -5
-          find . -name "snd-hwdep.ko" 2>/dev/null | head -5
-          find . -name "snd-rawmidi.ko" 2>/dev/null | head -5
-          find . -name "snd-usbmidi-lib.ko" 2>/dev/null | head -5
-
-      - name: Copy modules
-        run: |
-          mkdir -p /tmp/artifacts
+          mkdir -p output
           cd /tmp/linux-6.12.3
           
-          echo "=== Copying modules ==="
-          find . -name "snd-usb-audio.ko" -o \
-                 -name "snd-hwdep.ko" -o \
-                 -name "snd-rawmidi.ko" -o \
-                 -name "snd-usbmidi-lib.ko" | \
-            while read f; do
-              echo "Copying: $f"
-              cp "$f" /tmp/artifacts/
-            done
+          # Find and copy
+          find . -name 'snd-usb-audio.ko' -exec cp {} output/ \;
+          find . -name 'snd-hwdep.ko' -exec cp {} output/ \;
+          find . -name 'snd-rawmidi.ko' -exec cp {} output/ \;
+          find . -name 'snd-usbmidi-lib.ko' -exec cp {} output/ \;
           
-          ls -lah /tmp/artifacts/
+          echo "Output:"
+          ls -lah output/
 
-      - name: Create artifact bundle
-        run: |
-          mkdir -p $GITHUB_WORKSPACE/output
-          cp /tmp/artifacts/*.ko $GITHUB_WORKSPACE/output/ 2>/dev/null || echo "No .ko files found"
-          
-          cat > $GITHUB_WORKSPACE/output/README.txt << 'README_END'
-Edison snd-usb-audio Modules - Linux v6.12.3
-==============================================
-Kernel: 6.12.3-edison-acpi-preempt-rt
-
-To install:
-1. Copy *.ko files to /lib/modules/6.12.3-edison-acpi-preempt-rt/extra/
-2. Run: depmod -a 6.12.3-edison-acpi-preempt-rt
-3. Load modules: modprobe snd-usb-audio
-
-Included modules:
-- snd-usb-audio.ko (main USB audio support)
-- snd-hwdep.ko, snd-rawmidi.ko (dependencies)
-README_END
-          
-          ls -lah $GITHUB_WORKSPACE/output/
-
-      - name: Upload artifacts
+      - name: Upload
         uses: actions/upload-artifact@v4
         with:
-          name: snd-usb-audio-edison-6.12.3
+          name: snd-usb-audio-edison
           path: output/
