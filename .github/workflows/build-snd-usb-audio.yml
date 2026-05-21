@@ -12,30 +12,41 @@ jobs:
   build:
     runs-on: ubuntu-latest
     container:
-      image: gcc:latest
+      image: gcc:13
       options: --user root
 
     steps:
-      - name: Install git and download tools
+      - name: Install dependencies
         run: |
-          apt-get update && apt-get install -y git curl xz-utils bc flex bison libelf-dev libssl-dev
+          echo "Installing build dependencies..."
+          apt-get update -qq
+          apt-get install -y --no-install-recommends \
+            git curl xz-utils bc flex bison libelf-dev libssl-dev ca-certificates make
+          echo "Dependencies installed"
+          gcc --version | head -1
+          make --version | head -1
 
       - uses: actions/checkout@v4
 
-      - name: Download Linux kernel
+      - name: Download kernel source
         run: |
           cd /tmp
-          curl -L -o linux-6.12.3.tar.xz https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.12.3.tar.xz
+          echo "Fetching kernel..."
+          curl -f -L -o linux-6.12.3.tar.xz https://cdn.kernel.org/pub/linux/kernel/v6.x/linux-6.12.3.tar.xz
+          echo "Extracting..."
           tar -xf linux-6.12.3.tar.xz
           cd linux-6.12.3
-          echo "Kernel ready: $(pwd)"
+          echo "Done: $(pwd)"
+          ls -la | head -10
 
       - name: Configure kernel
         run: |
           cd /tmp/linux-6.12.3
-          make defconfig
+          echo "Running defconfig..."
+          make defconfig -j4
           
-          cat >> .config << 'EOF'
+          echo "Adding audio config..."
+          cat >> .config << 'CONFIG_EOF'
 CONFIG_SND=y
 CONFIG_SND_USB=y
 CONFIG_SND_USB_AUDIO=m
@@ -43,25 +54,75 @@ CONFIG_SND_HWDEP=m
 CONFIG_SND_RAWMIDI=m
 CONFIG_LOCALVERSION="-edison-acpi-preempt-rt"
 # CONFIG_LOCALVERSION_AUTO is not set
-EOF
+CONFIG_EOF
           
-          yes | make oldconfig
+          echo "Finalizing config..."
+          yes | make oldconfig -j4
+          
+          echo "=== Final Configuration ==="
+          grep "CONFIG_SND_USB_AUDIO\|CONFIG_LOCALVERSION\|CONFIG_LOCALVERSION_AUTO" .config
 
-      - name: Build kernel
+      - name: Build prepare (kernel headers)
         run: |
           cd /tmp/linux-6.12.3
-          make -j2 2>&1 | tail -100
+          echo "Building kernel infrastructure for modules..."
+          make -j4 modules_prepare
+          echo "Done"
+
+      - name: Full kernel build
+        run: |
+          cd /tmp/linux-6.12.3
+          echo "=== Starting full build ===" 
+          echo "CPUs: $(nproc)"
+          
+          # Show first error if it occurs
+          make -j2 2>&1 | \
+            tee /tmp/build.log | \
+            grep -E "^(  CC|  AS|  LD|error:|undefined reference|cannot find)" | \
+            tail -30
+
+      - name: Check build status
+        run: |
+          cd /tmp/linux-6.12.3
+          if [ -f vmlinux ]; then
+            echo "✓ vmlinux built"
+            ls -lh vmlinux
+          else
+            echo "✗ vmlinux MISSING - showing last errors"
+            tail -50 /tmp/build.log | grep -i error || tail -50 /tmp/build.log
+            exit 1
+          fi
 
       - name: Collect modules
         run: |
-          mkdir -p /tmp/out
           cd /tmp/linux-6.12.3
-          find . -name "snd-usb-audio.ko" -o -name "snd-hwdep.ko" -o -name "snd-rawmidi.ko" -o -name "snd-usbmidi-lib.ko" | \
-            xargs -I {} cp {} /tmp/out/
-          ls -lah /tmp/out/
+          mkdir -p /tmp/output
+          
+          echo "Finding audio modules..."
+          count=0
+          for mod in snd-usb-audio snd-hwdep snd-rawmidi snd-usbmidi-lib; do
+            find . -name "${mod}.ko" -type f -exec cp {} /tmp/output/ \; && {
+              count=$((count + 1))
+              echo "✓ Copied ${mod}.ko"
+            }
+          done
+          
+          if [ $count -eq 0 ]; then
+            echo "✗ ERROR: No modules found!"
+            echo "Listing all .ko files:"
+            find . -name "*.ko" -type f 2>/dev/null | head -20
+            exit 1
+          fi
 
-      - name: Upload
+      - name: Verify modules
+        run: |
+          cd /tmp/output
+          echo "=== Modules Ready ===" 
+          ls -lah *.ko
+          file *.ko | head -5
+
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: snd-usb-audio-edison
-          path: /tmp/out/
+          name: snd-usb-audio-edison-6.12.3
+          path: /tmp/output/
