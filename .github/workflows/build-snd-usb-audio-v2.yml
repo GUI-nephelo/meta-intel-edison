@@ -1,0 +1,197 @@
+name: Build snd-usb-audio module for Edison (v2 - debug)
+
+on:
+  push:
+    branches:
+      - snd-usb-audio-debug
+    paths:
+      - '.github/workflows/build-snd-usb-audio-v2.yml'
+  workflow_dispatch:
+    inputs:
+      debug:
+        description: 'Enable debug output'
+        required: false
+        default: 'true'
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      KVER: "6.12.3-edison-acpi-preempt-rt"
+
+    steps:
+      - name: Checkout repository (this fork)
+        uses: actions/checkout@v4
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            flex bison libelf-dev libssl-dev bc build-essential \
+            libncurses-dev libncurses5 libncursesw5 git ccache \
+            bc kmod bsdmainutils
+          echo "Installed tools:"
+          which gcc make git
+          gcc --version | head -1
+
+      - name: Clone Linux kernel source v6.12.3
+        run: |
+          echo "Cloning kernel v6.12.3..."
+          git clone --depth 1 --branch v6.12.3 https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git ~/linux-source
+          cd ~/linux-source
+          echo "Kernel source structure:"
+          ls -la | head -15
+
+      - name: Show kernel version info
+        run: |
+          cd ~/linux-source
+          echo "=== Makefile VERSION ==="
+          grep "^VERSION\|^PATCHLEVEL\|^SUBLEVEL" Makefile
+          echo ""
+          echo "=== scripts/setlocalversion (original) ==="
+          head -30 scripts/setlocalversion || true
+
+      - name: Patch setlocalversion to use KVER
+        run: |
+          cd ~/linux-source
+          echo "Creating custom setlocalversion script..."
+          cat > scripts/setlocalversion << 'EOF'
+#!/bin/sh
+# Custom setlocalversion for Edison build
+echo "${LOCALVERSION}"
+EOF
+          chmod +x scripts/setlocalversion
+          echo "Custom setlocalversion:"
+          cat scripts/setlocalversion
+          echo ""
+          echo "Test output: $(scripts/setlocalversion)"
+          LOCALVERSION="${KVER}" scripts/setlocalversion
+
+      - name: Create kernel config
+        run: |
+          cd ~/linux-source
+          echo "Creating defconfig..."
+          make defconfig
+          echo ""
+          echo "Enabling audio/USB modules..."
+          ./scripts/config --enable CONFIG_SND
+          ./scripts/config --enable CONFIG_USB_AUDIO || true
+          ./scripts/config --module CONFIG_SND_USB_AUDIO || true
+          ./scripts/config --module CONFIG_SND_HWDEP || true
+          ./scripts/config --module CONFIG_SND_RAWMIDI || true
+          ./scripts/config --disable CONFIG_LOCALVERSION_AUTO
+          ./scripts/config --set-str CONFIG_LOCALVERSION "${KVER}"
+          echo ""
+          echo "=== Config check ==="
+          grep -E 'CONFIG_SND_USB|CONFIG_LOCALVERSION' .config | head -10
+          yes '' | make oldconfig > /dev/null 2>&1
+          echo "Config prepared."
+
+      - name: Run modules_prepare
+        run: |
+          cd ~/linux-source
+          echo "Running modules_prepare..."
+          make modules_prepare 2>&1 | tail -20
+
+      - name: Build full kernel
+        run: |
+          cd ~/linux-source
+          echo "Building kernel (parallel)..."
+          timeout 90m make -j$(nproc) 2>&1 | tail -50 || echo "Build output tail complete"
+          echo ""
+          echo "=== Build status check ==="
+          if [ -f vmlinux ]; then
+            echo "✓ vmlinux built"
+            ls -lh vmlinux
+          else
+            echo "✗ vmlinux NOT found"
+          fi
+
+      - name: Find and verify modules
+        run: |
+          cd ~/linux-source
+          echo "=== Searching for .ko files ==="
+          find . -name '*.ko' -type f 2>/dev/null | wc -l
+          echo ""
+          echo "=== Sound/USB related modules ==="
+          find . -name '*snd*.ko' -o -name '*usb*.ko' | head -20
+          echo ""
+          echo "=== Audio/ALSA modules ==="
+          find sound -name '*.ko' 2>/dev/null | head -20
+          echo ""
+          echo "=== USB subsystem modules ==="
+          find drivers/usb -name '*.ko' 2>/dev/null | head -20
+
+      - name: Copy target modules
+        run: |
+          mkdir -p $GITHUB_WORKSPACE/output/modules
+          cd ~/linux-source
+          
+          TARGETS=("snd-usb-audio.ko" "snd-usbmidi-lib.ko" "snd-hwdep.ko" "snd-rawmidi.ko")
+          
+          for target in "${TARGETS[@]}"; do
+            echo "Looking for $target..."
+            FOUND=$(find . -name "$target" -type f 2>/dev/null)
+            if [ -n "$FOUND" ]; then
+              echo "✓ Found: $FOUND"
+              for f in $FOUND; do
+                cp -v "$f" $GITHUB_WORKSPACE/output/modules/
+              done
+            else
+              echo "✗ Not found: $target"
+            fi
+          done
+          
+          echo ""
+          echo "=== Copied modules ==="
+          ls -lh $GITHUB_WORKSPACE/output/modules/ 2>/dev/null || echo "No modules copied"
+
+      - name: Verify module information
+        run: |
+          cd ~/linux-source
+          if [ -d "$GITHUB_WORKSPACE/output/modules" ]; then
+            for ko in $GITHUB_WORKSPACE/output/modules/*.ko; do
+              if [ -f "$ko" ]; then
+                echo "=== $(basename $ko) ==="
+                file "$ko"
+                modinfo "$ko" 2>/dev/null | grep -E "vermagic|depends|filename" | head -5
+              fi
+            done
+          fi
+
+      - name: Create install script
+        run: |
+          cat > $GITHUB_WORKSPACE/output/install_on_edison.sh << 'SCRIPT'
+#!/bin/bash
+set -e
+KVER="${KVER:-6.12.3-edison-acpi-preempt-rt}"
+MODDIR="/lib/modules/$KVER/extra"
+echo "Installing modules for kernel: $KVER"
+mkdir -p "$MODDIR"
+cp -v "$(dirname "$0")/modules/"*.ko "$MODDIR/"
+depmod -a "$KVER"
+echo "Module installation complete"
+SCRIPT
+          chmod +x $GITHUB_WORKSPACE/output/install_on_edison.sh
+
+      - name: Summary
+        run: |
+          echo "=== BUILD SUMMARY ==="
+          echo "Artifacts location: $GITHUB_WORKSPACE/output"
+          ls -lah $GITHUB_WORKSPACE/output/
+          if [ -d "$GITHUB_WORKSPACE/output/modules" ]; then
+            echo ""
+            echo "Modules:"
+            ls -lah $GITHUB_WORKSPACE/output/modules/
+          fi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: snd-usb-audio-modules-v6.12.3-debug
+          path: output/
+          retention-days: 90
