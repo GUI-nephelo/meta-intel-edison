@@ -215,16 +215,17 @@ jobs:
       - name: Verify and collect modules
         run: |
           cd ~/linux-source
-          KVER="6.12.3-edison-acpi-preempt-rt"
 
           # Collect all expected .ko files
-          mkdir -p output/modules/{1wire,wireguard,nftables,vlan,pwm}
+          mkdir -p output/modules/1wire
+          mkdir -p output/modules/wireguard
+          mkdir -p output/modules/nftables
+          mkdir -p output/modules/vlan
+          mkdir -p output/modules/pwm
 
           # 1-Wire
           echo "=== 1-Wire modules ==="
-          for ko in $(find drivers/w1 -name '*.ko' 2>/dev/null); do
-            cp -v "$ko" output/modules/1wire/
-          done
+          find drivers/w1 -name '*.ko' -exec cp -v {} output/modules/1wire/ \;
           ls output/modules/1wire/
 
           # WireGuard
@@ -238,23 +239,19 @@ jobs:
 
           # nftables
           echo "=== nftables modules ==="
-          for ko in $(find net/netfilter -name 'nf_tables*.ko' -o -name 'nft_*.ko' 2>/dev/null); do
-            cp -v "$ko" output/modules/nftables/
-          done
+          find net/netfilter -name 'nf_tables*.ko' -exec cp -v {} output/modules/nftables/ \;
+          find net/netfilter -name 'nft_*.ko' -exec cp -v {} output/modules/nftables/ \;
           ls output/modules/nftables/
 
           # 802.1Q
           echo "=== VLAN modules ==="
-          for ko in $(find net/8021q -name '*.ko' 2>/dev/null); do
-            cp -v "$ko" output/modules/vlan/"
-          done
+          find net/8021q -name '*.ko' -exec cp -v {} output/modules/vlan/ \;
           ls output/modules/vlan/
 
           # PWM
           echo "=== PWM modules ==="
-          for ko in $(find drivers/pwm -name 'pwm-gpio.ko' -o -name 'pwm-pca9685.ko' 2>/dev/null); do
-            cp -v "$ko" output/modules/pwm/
-          done
+          find drivers/pwm -name 'pwm-gpio.ko' -exec cp -v {} output/modules/pwm/ \;
+          find drivers/pwm -name 'pwm-pca9685.ko' -exec cp -v {} output/modules/pwm/ \;
           ls output/modules/pwm/
 
           # Overall verification
@@ -278,32 +275,31 @@ jobs:
 
       - name: Create install script
         run: |
-          KVER="6.12.3-edison-acpi-preempt-rt"
-          cat > output/install_on_edison.sh << INSTALL_EOF
+          cat > output/install_on_edison.sh << 'INSTALL_EOF'
           #!/bin/bash
           set -e
-          KVER="${KVER}"
-          SCRIPT_DIR="\$(cd "\$(dirname "\$0")" && pwd)"
-          MODDIR="/lib/modules/\$KVER/extra"
+          KVER="6.12.3-edison-acpi-preempt-rt"
+          SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+          MODDIR="/lib/modules/$KVER/extra"
 
-          mkdir -p "\$MODDIR"
+          mkdir -p "$MODDIR"
 
           echo "=== Installing 1-Wire modules ==="
-          cp -v "\$SCRIPT_DIR/modules/1wire/"*.ko "\$MODDIR/" 2>/dev/null || echo "No 1-Wire modules"
+          cp -v "$SCRIPT_DIR/modules/1wire/"*.ko "$MODDIR/" 2>/dev/null || echo "No 1-Wire modules"
 
           echo "=== Installing WireGuard ==="
-          cp -v "\$SCRIPT_DIR/modules/wireguard/"*.ko "\$MODDIR/" 2>/dev/null || echo "No WireGuard modules"
+          cp -v "$SCRIPT_DIR/modules/wireguard/"*.ko "$MODDIR/" 2>/dev/null || echo "No WireGuard modules"
 
           echo "=== Installing nftables modules ==="
-          cp -v "\$SCRIPT_DIR/modules/nftables/"*.ko "\$MODDIR/" 2>/dev/null || echo "No nftables modules"
+          cp -v "$SCRIPT_DIR/modules/nftables/"*.ko "$MODDIR/" 2>/dev/null || echo "No nftables modules"
 
           echo "=== Installing VLAN ==="
-          cp -v "\$SCRIPT_DIR/modules/vlan/"*.ko "\$MODDIR/" 2>/dev/null || echo "No VLAN modules"
+          cp -v "$SCRIPT_DIR/modules/vlan/"*.ko "$MODDIR/" 2>/dev/null || echo "No VLAN modules"
 
           echo "=== Installing PWM ==="
-          cp -v "\$SCRIPT_DIR/modules/pwm/"*.ko "\$MODDIR/" 2>/dev/null || echo "No PWM modules"
+          cp -v "$SCRIPT_DIR/modules/pwm/"*.ko "$MODDIR/" 2>/dev/null || echo "No PWM modules"
 
-          depmod -a "\$KVER"
+          depmod -a "$KVER"
 
           echo ""
           echo "=== Loading test ==="
