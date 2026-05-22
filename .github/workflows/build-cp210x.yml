@@ -164,7 +164,7 @@ jobs:
           for ko in $KOS; do
             MOD_SIZE=$(readelf -SW "$ko" | grep '.gnu.linkonce.this_module' | awk '{print $6}')
             echo "$ko this_module_size=0x$MOD_SIZE"
-            if [ "0x$MOD_SIZE" != "0x4c0" ]; then
+            if [ "0x${MOD_SIZE#0x}" != "0x4c0" ]; then
               echo "ERROR: struct module size mismatch! Expected 0x4c0, got 0x$MOD_SIZE"
               exit 1
             fi
