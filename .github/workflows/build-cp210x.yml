@@ -160,9 +160,6 @@ jobs:
             echo "$ko: $VER"
           done
 
-         
-          done
-
       - name: Package modules
         run: |
           mkdir -p output/modules
