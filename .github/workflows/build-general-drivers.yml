@@ -33,7 +33,7 @@ jobs:
         id: cache-linux
         with:
           path: ~/linux-source
-          key: linux-v6.12.3-general-drivers-v1
+          key: linux-v6.12.3-general-drivers-v2
 
       - name: Clone Linux kernel source
         if: steps.cache-linux.outputs.cache-hit != 'true'
@@ -118,44 +118,15 @@ jobs:
           # Merge all fragments at once
           scripts/kconfig/merge_config.sh -m .config $MERGE_CFG 2>&1 | tail -30
 
-          # ============================================
+          # ========================================
           # Enable target driver modules
-          # ============================================
+          # ========================================
 
-          # --- 1-Wire ---
-          scripts/config --module CONFIG_W1
-          scripts/config --module CONFIG_W1_MASTER_GPIO
-          scripts/config --module CONFIG_W1_MASTER_DS2490
-          scripts/config --module CONFIG_W1_SLAVE_THERM
-          scripts/config --module CONFIG_W1_SLAVE_DS2408
-          scripts/config --module CONFIG_W1_SLAVE_DS2413
-          scripts/config --module CONFIG_W1_SLAVE_DS2423
-          scripts/config --module CONFIG_W1_SLAVE_EEPROM
-          scripts/config --module CONFIG_W1_SLAVE_SMEM
-
-          # --- nftables ---
-          scripts/config --module CONFIG_NF_TABLES
-          scripts/config --module CONFIG_NFT_COMPAT
-          scripts/config --module CONFIG_NFT_CT
-          scripts/config --module CONFIG_NFT_COUNTER
-          scripts/config --module CONFIG_NFT_LIMIT
-          scripts/config --module CONFIG_NFT_NAT
-          scripts/config --module CONFIG_NFT_MASQ
-          scripts/config --module CONFIG_NFT_QUEUE
-          scripts/config --module CONFIG_NFT_LOG
-          scripts/config --module CONFIG_NFT_REJECT
-          scripts/config --module CONFIG_NFT_HASH
-          scripts/config --module CONFIG_NFT_FIB
-          scripts/config --module CONFIG_NFT_OBJREF
-          scripts/config --module CONFIG_NFT_BRIDGE
-          scripts/config --module CONFIG_NFT_ARP
+          # --- WireGuard ---
+          scripts/config --module CONFIG_WIREGUARD
 
           # --- 802.1Q VLAN ---
           scripts/config --module CONFIG_VLAN_8021Q
-
-          # --- PWM ---
-          scripts/config --module CONFIG_PWM_GPIO
-          scripts/config --module CONFIG_PWM_PCA9685
 
           # Ensure vermagic matches exactly
           scripts/config --set-str CONFIG_LOCALVERSION "-edison-acpi-preempt-rt"
@@ -164,12 +135,10 @@ jobs:
           yes '' | make oldconfig 2>&1 | tail -10
 
           echo "=== Key configs verification ==="
-          grep -E 'CONFIG_W1=|CONFIG_W1_MASTER_GPIO=|CONFIG_W1_SLAVE_THERM=|CONFIG_WIREGUARD=|CONFIG_NF_TABLES=|CONFIG_VLAN_8021Q=|CONFIG_PWM_GPIO=|CONFIG_PWM_PCA9685=|CONFIG_PREEMPT_RT=|CONFIG_LOCALVERSION=|CONFIG_LOCALVERSION_AUTO=' .config
+          grep -E 'CONFIG_WIREGUARD=|CONFIG_VLAN_8021Q=|CONFIG_PREEMPT_RT=|CONFIG_LOCALVERSION=|CONFIG_LOCALVERSION_AUTO=' .config
 
           # Verify critical modules
-          for opt in CONFIG_W1 CONFIG_W1_MASTER_GPIO CONFIG_W1_SLAVE_THERM \
-                     CONFIG_NF_TABLES CONFIG_VLAN_8021Q \
-                     CONFIG_PWM_GPIO CONFIG_PWM_PCA9685; do
+          for opt in CONFIG_WIREGUARD CONFIG_VLAN_8021Q; do
             if ! grep -q "${opt}=m" .config; then
               echo "FATAL: ${opt} not set as module!"
               grep -E "$(echo $opt | sed 's/CONFIG_/CONFIG_/')" .config
@@ -182,63 +151,50 @@ jobs:
           cd ~/linux-source
           make -j$(nproc) 2>&1 | tail -10
 
-      - name: Build out-of-tree driver modules
+      - name: Patch 8021q Makefile and build out-of-tree modules
         run: |
           cd ~/linux-source
 
-          # 1-Wire
-          echo "=== Building 1-Wire modules ==="
-          make M=drivers/w1 2>&1 | tail -5
+          # === Fix 8021q Makefile ===
+          # Default Makefile uses $(subst m,y,...) trick that puts vlan_core.o
+          # into obj-y (builtin) instead of 8021q.ko. We must include it in
+          # 8021q-y so vlan_vid_add etc symbols are inside the module.
+          echo "=== Patching net/8021q/Makefile ==="
+          sed -i '/^obj-\$(subst m,y,\$(CONFIG_VLAN_8021Q)).*vlan_core\.o/d' net/8021q/Makefile
+          sed -i 's/^8021q-y.*/& vlan_core.o/' net/8021q/Makefile
+          echo "--- Patched Makefile ---"
+          cat net/8021q/Makefile
 
-          # nftables
-          echo "=== Building nftables modules ==="
-          make M=net/netfilter 2>&1 | tail -5
+          # WireGuard
+          echo "=== Building WireGuard ==="
+          make M=drivers/net/wireguard 2>&1 | tail -5
 
           # 802.1Q VLAN
           echo "=== Building 802.1Q VLAN ==="
           make M=net/8021q 2>&1 | tail -5
 
-          # PWM
-          echo "=== Building PWM modules ==="
-          make M=drivers/pwm 2>&1 | tail -5
-
       - name: Verify and collect modules
         run: |
           cd ~/linux-source
 
-          # Collect all expected .ko files
-          mkdir -p output/modules/1wire
-          mkdir -p output/modules/nftables
+          mkdir -p output/modules/wireguard
           mkdir -p output/modules/vlan
-          mkdir -p output/modules/pwm
 
-          # 1-Wire
-          echo "=== 1-Wire modules ==="
-          find drivers/w1 -name '*.ko' -exec cp -v {} output/modules/1wire/ \;
-          ls output/modules/1wire/
-
-          # nftables
-          echo "=== nftables modules ==="
-          find net/netfilter -name 'nf_tables*.ko' -exec cp -v {} output/modules/nftables/ \;
-          find net/netfilter -name 'nft_*.ko' -exec cp -v {} output/modules/nftables/ \;
-          ls output/modules/nftables/
+          # WireGuard
+          echo "=== WireGuard modules ==="
+          find drivers/net/wireguard -name '*.ko' -exec cp -v {} output/modules/wireguard/ \;
+          ls output/modules/wireguard/
 
           # 802.1Q
           echo "=== VLAN modules ==="
           find net/8021q -name '*.ko' -exec cp -v {} output/modules/vlan/ \;
           ls output/modules/vlan/
 
-          # PWM
-          echo "=== PWM modules ==="
-          find drivers/pwm -name 'pwm-gpio.ko' -exec cp -v {} output/modules/pwm/ \;
-          find drivers/pwm -name 'pwm-pca9685.ko' -exec cp -v {} output/modules/pwm/ \;
-          ls output/modules/pwm/
-
           # Overall verification
           echo ""
-          echo "============================================"
+          echo "=========================================="
           echo "  MODULE VERIFICATION SUMMARY"
-          echo "============================================"
+          echo "=========================================="
           TOTAL=0
           for ko in $(find output/modules -name '*.ko'); do
             TOTAL=$((TOTAL + 1))
@@ -251,7 +207,7 @@ jobs:
           done
           echo ""
           echo "Total modules: $TOTAL"
-          echo "============================================"
+          echo "=========================================="
 
       - name: Create install script
         run: |
@@ -265,36 +221,22 @@ jobs:
 
           mkdir -p "$MODDIR"
 
-          echo "=== Installing 1-Wire modules ==="
-          cp -v "$SCRIPT_DIR/modules/1wire/"*.ko "$MODDIR/" 2>/dev/null || echo "No 1-Wire modules"
-
-          echo "=== Installing nftables modules ==="
-          cp -v "$SCRIPT_DIR/modules/nftables/"*.ko "$MODDIR/" 2>/dev/null || echo "No nftables modules"
+          echo "=== Installing WireGuard ==="
+          cp -v "$SCRIPT_DIR/modules/wireguard/"*.ko "$MODDIR/" 2>/dev/null || echo "No WireGuard modules"
 
           echo "=== Installing VLAN ==="
           cp -v "$SCRIPT_DIR/modules/vlan/"*.ko "$MODDIR/" 2>/dev/null || echo "No VLAN modules"
-
-          echo "=== Installing PWM ==="
-          cp -v "$SCRIPT_DIR/modules/pwm/"*.ko "$MODDIR/" 2>/dev/null || echo "No PWM modules"
 
           depmod -a "$KVER"
 
           echo ""
           echo "=== Loading test ==="
 
-          # 1-Wire
-          modprobe w1-gpio 2>/dev/null && echo "  w1-gpio: OK" || echo "  w1-gpio: FAIL"
-          modprobe w1-therm 2>/dev/null && echo "  w1-therm: OK" || echo "  w1-therm: FAIL"
-
-          # nftables
-          modprobe nf_tables 2>/dev/null && echo "  nf_tables: OK" || echo "  nf_tables: FAIL"
+          # WireGuard
+          modprobe wireguard 2>/dev/null && echo "  wireguard: OK" || echo "  wireguard: FAIL"
 
           # VLAN
           modprobe 8021q 2>/dev/null && echo "  8021q: OK" || echo "  8021q: FAIL"
-
-          # PWM
-          modprobe pwm-gpio 2>/dev/null && echo "  pwm-gpio: OK" || echo "  pwm-gpio: FAIL"
-          modprobe pwm-pca9685 2>/dev/null && echo "  pwm-pca9685: OK" || echo "  pwm-pca9685: FAIL"
 
           echo ""
           echo "=== All modules installed ==="
