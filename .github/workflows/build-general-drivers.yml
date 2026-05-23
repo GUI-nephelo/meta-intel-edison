@@ -33,7 +33,7 @@ jobs:
         id: cache-linux
         with:
           path: ~/linux-source
-          key: linux-v6.12.3-general-drivers-v2
+          key: linux-v6.12.3-general-drivers-v3
 
       - name: Clone Linux kernel source
         if: steps.cache-linux.outputs.cache-hit != 'true'
@@ -124,6 +124,13 @@ jobs:
 
           # --- WireGuard ---
           scripts/config --module CONFIG_WIREGUARD
+          # WireGuard crypto dependencies (must be =m so .ko files are produced)
+          scripts/config --module CONFIG_CRYPTO_LIB_CHACHA20POLY1305
+          scripts/config --module CONFIG_CRYPTO_LIB_CURVE25519
+          scripts/config --module CONFIG_CRYPTO_CURVE25519_X86
+          # UDP tunnel dependencies
+          scripts/config --module CONFIG_UDP_TUNNEL
+          scripts/config --module CONFIG_INET_UDP_TUNNEL
 
           # --- 802.1Q VLAN ---
           scripts/config --module CONFIG_VLAN_8021Q
@@ -135,16 +142,20 @@ jobs:
           yes '' | make oldconfig 2>&1 | tail -10
 
           echo "=== Key configs verification ==="
-          grep -E 'CONFIG_WIREGUARD=|CONFIG_VLAN_8021Q=|CONFIG_PREEMPT_RT=|CONFIG_LOCALVERSION=|CONFIG_LOCALVERSION_AUTO=' .config
+          grep -E 'CONFIG_WIREGUARD=|CONFIG_VLAN_8021Q=|CONFIG_CRYPTO_LIB_CHACHA20POLY1305=|CONFIG_CRYPTO_LIB_CURVE25519=|CONFIG_CRYPTO_CURVE25519_X86=|CONFIG_UDP_TUNNEL=|CONFIG_INET_UDP_TUNNEL=|CONFIG_PREEMPT_RT=|CONFIG_LOCALVERSION=' .config
 
           # Verify critical modules
-          for opt in CONFIG_WIREGUARD CONFIG_VLAN_8021Q; do
+          FAILED=0
+          for opt in CONFIG_WIREGUARD CONFIG_VLAN_8021Q \
+                     CONFIG_CRYPTO_LIB_CHACHA20POLY1305 CONFIG_CRYPTO_LIB_CURVE25519 \
+                     CONFIG_UDP_TUNNEL CONFIG_INET_UDP_TUNNEL; do
             if ! grep -q "${opt}=m" .config; then
               echo "FATAL: ${opt} not set as module!"
-              grep -E "$(echo $opt | sed 's/CONFIG_/CONFIG_/')" .config
-              exit 1
+              grep -E "${opt}" .config || echo "  (not found at all)"
+              FAILED=1
             fi
           done
+          [ $FAILED -eq 1 ] && exit 1
 
       - name: Build full kernel + modules
         run: |
@@ -154,24 +165,33 @@ jobs:
       - name: Patch 8021q Makefile and build out-of-tree modules
         run: |
           cd ~/linux-source
+          set -o pipefail
 
           # === Fix 8021q Makefile ===
-          # Default Makefile uses $(subst m,y,...) trick that puts vlan_core.o
-          # into obj-y (builtin) instead of 8021q.ko. We must include it in
-          # 8021q-y so vlan_vid_add etc symbols are inside the module.
+          # vlan_core.c has its own module_init (vlan_offload_init) which conflicts
+          # with vlan.c's module_init when linked into same composite module.
+          # Fix: make vlan_core a SEPARATE module (obj-m) instead of builtin (obj-y).
+          # The $(subst m,y,...) trick forces obj-y; we replace it with obj-m.
           echo "=== Patching net/8021q/Makefile ==="
-          sed -i '/^obj-\$(subst m,y,\$(CONFIG_VLAN_8021Q)).*vlan_core\.o/d' net/8021q/Makefile
-          sed -i 's/^8021q-y.*/& vlan_core.o/' net/8021q/Makefile
+          sed -i 's/^obj-\$(subst m,y,\$(CONFIG_VLAN_8021Q)).*vlan_core\.o/obj-m += vlan_core.o/' net/8021q/Makefile
           echo "--- Patched Makefile ---"
           cat net/8021q/Makefile
 
           # WireGuard
           echo "=== Building WireGuard ==="
           make M=drivers/net/wireguard 2>&1 | tail -5
+          echo "=== WireGuard build exit: $? ==="
 
-          # 802.1Q VLAN
+          # 802.1Q VLAN (now produces vlan_core.ko + 8021q.ko)
           echo "=== Building 802.1Q VLAN ==="
           make M=net/8021q 2>&1 | tail -5
+          echo "=== 8021q build exit: $? ==="
+
+          # Verify 8021q build produced both modules
+          echo "=== Verify vlan_core.ko ==="
+          ls -la net/8021q/vlan_core.ko || echo "MISSING vlan_core.ko!"
+          echo "=== Verify 8021q.ko ==="
+          ls -la net/8021q/8021q.ko || echo "MISSING 8021q.ko!"
 
       - name: Verify and collect modules
         run: |
@@ -180,12 +200,24 @@ jobs:
           mkdir -p output/modules/wireguard
           mkdir -p output/modules/vlan
 
-          # WireGuard
-          echo "=== WireGuard modules ==="
+          # WireGuard dependencies (from full kernel build)
+          echo "=== Collecting WireGuard dependencies ==="
+          for mod in libchacha20poly1305 udp_tunnel ip6_udp_tunnel curve25519-x86_64 libcurve25519-generic; do
+            ko=$(find . -name "${mod}.ko" -not -path "./output/*" | head -1)
+            if [ -n "$ko" ]; then
+              echo "  Found: $ko"
+              cp -v "$ko" output/modules/wireguard/
+            else
+              echo "  MISSING: ${mod}.ko"
+            fi
+          done
+
+          # WireGuard itself
+          echo "=== WireGuard module ==="
           find drivers/net/wireguard -name '*.ko' -exec cp -v {} output/modules/wireguard/ \;
           ls output/modules/wireguard/
 
-          # 802.1Q
+          # 802.1Q (vlan_core.ko + 8021q.ko)
           echo "=== VLAN modules ==="
           find net/8021q -name '*.ko' -exec cp -v {} output/modules/vlan/ \;
           ls output/modules/vlan/
@@ -212,35 +244,41 @@ jobs:
       - name: Create install script
         run: |
           cd ~/linux-source
-          cat > output/install_on_edison.sh << 'EOF'
-          #!/bin/bash
-          set -e
-          KVER="6.12.3-edison-acpi-preempt-rt"
-          SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-          MODDIR="/lib/modules/$KVER/extra"
+          cat > output/install_on_edison.sh << 'INSTALLEOF'
+#!/bin/bash
+set -e
+KVER="6.12.3-edison-acpi-preempt-rt"
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+MODDIR="/lib/modules/$KVER/extra"
 
-          mkdir -p "$MODDIR"
+mkdir -p "$MODDIR"
 
-          echo "=== Installing WireGuard ==="
-          cp -v "$SCRIPT_DIR/modules/wireguard/"*.ko "$MODDIR/" 2>/dev/null || echo "No WireGuard modules"
+echo "=== Installing WireGuard + dependencies ==="
+cp -v "$SCRIPT_DIR/modules/wireguard/"*.ko "$MODDIR/" 2>/dev/null || echo "No WireGuard modules"
 
-          echo "=== Installing VLAN ==="
-          cp -v "$SCRIPT_DIR/modules/vlan/"*.ko "$MODDIR/" 2>/dev/null || echo "No VLAN modules"
+echo "=== Installing VLAN ==="
+cp -v "$SCRIPT_DIR/modules/vlan/"*.ko "$MODDIR/" 2>/dev/null || echo "No VLAN modules"
 
-          depmod -a "$KVER"
+depmod -a "$KVER"
 
-          echo ""
-          echo "=== Loading test ==="
+echo ""
+echo "=== Loading test ==="
 
-          # WireGuard
-          modprobe wireguard 2>/dev/null && echo "  wireguard: OK" || echo "  wireguard: FAIL"
+# WireGuard dependencies first
+for mod in libchacha20poly1305 libcurve25519-generic curve25519-x86_64 udp_tunnel ip6_udp_tunnel; do
+  modprobe "$mod" 2>/dev/null && echo "  $mod: OK" || echo "  $mod: FAIL (may be builtin)"
+done
 
-          # VLAN
-          modprobe 8021q 2>/dev/null && echo "  8021q: OK" || echo "  8021q: FAIL"
+# WireGuard
+modprobe wireguard 2>/dev/null && echo "  wireguard: OK" || echo "  wireguard: FAIL"
 
-          echo ""
-          echo "=== All modules installed ==="
-          EOF
+# VLAN (vlan_core must load first, modprobe handles dependency)
+modprobe vlan_core 2>/dev/null && echo "  vlan_core: OK" || echo "  vlan_core: FAIL"
+modprobe 8021q 2>/dev/null && echo "  8021q: OK" || echo "  8021q: FAIL"
+
+echo ""
+echo "=== All modules installed ==="
+INSTALLEOF
           chmod +x output/install_on_edison.sh
 
       - name: Upload general drivers
