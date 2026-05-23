@@ -305,5 +305,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: general-drivers-v6.12.3
-          path: linux-source/output/
+          path: /home/runner/linux-source/output/
           retention-days: 30
