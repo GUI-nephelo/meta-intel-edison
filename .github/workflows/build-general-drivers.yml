@@ -255,6 +255,7 @@ jobs:
 
       - name: Create install script
         run: |
+          touch output/install_on_edison.sh
           cat > output/install_on_edison.sh << 'EOF'
           #!/bin/bash
           set -e
