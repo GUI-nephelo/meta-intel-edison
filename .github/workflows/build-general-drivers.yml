@@ -40,9 +40,6 @@ jobs:
         run: |
           rm -rf ~/linux-source
           git clone --depth 1 --branch v6.12.3 \
-            https://github.com/gregkh/linux.git \
-            ~/linux-source || \
-          git clone --depth 1 --branch v6.12.3 \
             https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git \
             ~/linux-source
 
@@ -136,9 +133,6 @@ jobs:
           scripts/config --module CONFIG_W1_SLAVE_EEPROM
           scripts/config --module CONFIG_W1_SLAVE_SMEM
 
-          # --- WireGuard ---
-          scripts/config --module CONFIG_WIREGUARD
-
           # --- nftables ---
           scripts/config --module CONFIG_NF_TABLES
           scripts/config --module CONFIG_NFT_COMPAT
@@ -174,7 +168,7 @@ jobs:
 
           # Verify critical modules
           for opt in CONFIG_W1 CONFIG_W1_MASTER_GPIO CONFIG_W1_SLAVE_THERM \
-                     CONFIG_WIREGUARD CONFIG_NF_TABLES CONFIG_VLAN_8021Q \
+                     CONFIG_NF_TABLES CONFIG_VLAN_8021Q \
                      CONFIG_PWM_GPIO CONFIG_PWM_PCA9685; do
             if ! grep -q "${opt}=m" .config; then
               echo "FATAL: ${opt} not set as module!"
@@ -196,10 +190,6 @@ jobs:
           echo "=== Building 1-Wire modules ==="
           make M=drivers/w1 2>&1 | tail -5
 
-          # WireGuard
-          echo "=== Building WireGuard ==="
-          make M=net/wireguard 2>&1 | tail -5
-
           # nftables
           echo "=== Building nftables modules ==="
           make M=net/netfilter 2>&1 | tail -5
@@ -218,7 +208,6 @@ jobs:
 
           # Collect all expected .ko files
           mkdir -p output/modules/1wire
-          mkdir -p output/modules/wireguard
           mkdir -p output/modules/nftables
           mkdir -p output/modules/vlan
           mkdir -p output/modules/pwm
@@ -227,15 +216,6 @@ jobs:
           echo "=== 1-Wire modules ==="
           find drivers/w1 -name '*.ko' -exec cp -v {} output/modules/1wire/ \;
           ls output/modules/1wire/
-
-          # WireGuard
-          echo "=== WireGuard modules ==="
-          if [ -f net/wireguard/wireguard.ko ]; then
-            cp -v net/wireguard/wireguard.ko output/modules/wireguard/
-          else
-            echo "WARNING: wireguard.ko not found"
-          fi
-          ls output/modules/wireguard/
 
           # nftables
           echo "=== nftables modules ==="
@@ -287,9 +267,6 @@ jobs:
           echo "=== Installing 1-Wire modules ==="
           cp -v "$SCRIPT_DIR/modules/1wire/"*.ko "$MODDIR/" 2>/dev/null || echo "No 1-Wire modules"
 
-          echo "=== Installing WireGuard ==="
-          cp -v "$SCRIPT_DIR/modules/wireguard/"*.ko "$MODDIR/" 2>/dev/null || echo "No WireGuard modules"
-
           echo "=== Installing nftables modules ==="
           cp -v "$SCRIPT_DIR/modules/nftables/"*.ko "$MODDIR/" 2>/dev/null || echo "No nftables modules"
 
@@ -307,9 +284,6 @@ jobs:
           # 1-Wire
           modprobe w1-gpio 2>/dev/null && echo "  w1-gpio: OK" || echo "  w1-gpio: FAIL"
           modprobe w1-therm 2>/dev/null && echo "  w1-therm: OK" || echo "  w1-therm: FAIL"
-
-          # WireGuard
-          modprobe wireguard 2>/dev/null && echo "  wireguard: OK" || echo "  wireguard: FAIL"
 
           # nftables
           modprobe nf_tables 2>/dev/null && echo "  nf_tables: OK" || echo "  nf_tables: FAIL"
