@@ -244,41 +244,41 @@ jobs:
       - name: Create install script
         run: |
           cd ~/linux-source
-          cat > output/install_on_edison.sh << 'INSTALLEOF'
-#!/bin/bash
-set -e
-KVER="6.12.3-edison-acpi-preempt-rt"
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-MODDIR="/lib/modules/$KVER/extra"
-
-mkdir -p "$MODDIR"
-
-echo "=== Installing WireGuard + dependencies ==="
-cp -v "$SCRIPT_DIR/modules/wireguard/"*.ko "$MODDIR/" 2>/dev/null || echo "No WireGuard modules"
-
-echo "=== Installing VLAN ==="
-cp -v "$SCRIPT_DIR/modules/vlan/"*.ko "$MODDIR/" 2>/dev/null || echo "No VLAN modules"
-
-depmod -a "$KVER"
-
-echo ""
-echo "=== Loading test ==="
-
-# WireGuard dependencies first
-for mod in libchacha20poly1305 libcurve25519-generic curve25519-x86_64 udp_tunnel ip6_udp_tunnel; do
-  modprobe "$mod" 2>/dev/null && echo "  $mod: OK" || echo "  $mod: FAIL (may be builtin)"
-done
-
-# WireGuard
-modprobe wireguard 2>/dev/null && echo "  wireguard: OK" || echo "  wireguard: FAIL"
-
-# VLAN (vlan_core must load first, modprobe handles dependency)
-modprobe vlan_core 2>/dev/null && echo "  vlan_core: OK" || echo "  vlan_core: FAIL"
-modprobe 8021q 2>/dev/null && echo "  8021q: OK" || echo "  8021q: FAIL"
-
-echo ""
-echo "=== All modules installed ==="
-INSTALLEOF
+          cat > output/install_on_edison.sh << 'EOF'
+          #!/bin/bash 
+          set -e
+          KVER="6.12.3-edison-acpi-preempt-rt"
+          SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+          MODDIR="/lib/modules/$KVER/extra"
+          
+          mkdir -p "$MODDIR"
+          
+          echo "=== Installing WireGuard + dependencies ==="
+          cp -v "$SCRIPT_DIR/modules/wireguard/"*.ko "$MODDIR/" 2>/dev/null || echo "No WireGuard modules"
+          
+          echo "=== Installing VLAN ==="
+          cp -v "$SCRIPT_DIR/modules/vlan/"*.ko "$MODDIR/" 2>/dev/null || echo "No VLAN modules"
+          
+          depmod -a "$KVER"
+          
+          echo ""
+          echo "=== Loading test ==="
+          
+          # WireGuard dependencies first
+          for mod in libchacha20poly1305 libcurve25519-generic curve25519-x86_64 udp_tunnel ip6_udp_tunnel; do
+            modprobe "$mod" 2>/dev/null && echo "  $mod: OK" || echo "  $mod: FAIL (may be builtin)"
+          done
+          
+          # WireGuard
+          modprobe wireguard 2>/dev/null && echo "  wireguard: OK" || echo "  wireguard: FAIL"
+          
+          # VLAN (vlan_core must load first, modprobe handles dependency)
+          modprobe vlan_core 2>/dev/null && echo "  vlan_core: OK" || echo "  vlan_core: FAIL"
+          modprobe 8021q 2>/dev/null && echo "  8021q: OK" || echo "  8021q: FAIL"
+          
+          echo ""
+          echo "=== All modules installed ==="
+          EOF
           chmod +x output/install_on_edison.sh
 
       - name: Upload general drivers
