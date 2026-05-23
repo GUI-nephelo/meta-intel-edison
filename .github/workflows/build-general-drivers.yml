@@ -201,7 +201,7 @@ jobs:
           ls -la net/8021q/8021q.ko
           echo "=== Verify WireGuard deps resolved ==="
           modinfo drivers/net/wireguard/wireguard.ko | grep depends
-          echo "=== Verify 8021q deps resolved ==="
+          echo "=== Verify 8021q no undefined symbols ==="
           nm net/8021q/8021q.ko | grep ' U ' | head -10 || echo "No undefined symbols!"
 
       - name: Verify and collect modules
@@ -256,41 +256,44 @@ jobs:
       - name: Create install script
         run: |
           cd ~/linux-source
-          cat > output/install_on_edison.sh << 'INSTALLEOF'
-#!/bin/bash
-set -e
-KVER="6.12.3-edison-acpi-preempt-rt"
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-MODDIR="/lib/modules/$KVER/extra"
+          cat > output/install_on_edison.sh << 'EOF'
+          #!/bin/bash
+          set -e
+          KVER="6.12.3-edison-acpi-preempt-rt"
+          SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+          MODDIR="/lib/modules/$KVER/extra"
 
-mkdir -p "$MODDIR"
+          mkdir -p "$MODDIR"
 
-echo "=== Installing WireGuard + dependencies ==="
-cp -v "$SCRIPT_DIR/modules/wireguard/"*.ko "$MODDIR/" 2>/dev/null || echo "No WireGuard modules"
+          echo "=== Installing WireGuard + dependencies ==="
+          cp -v "$SCRIPT_DIR/modules/wireguard/"*.ko "$MODDIR/" 2>/dev/null || echo "No WireGuard modules"
 
-echo "=== Installing VLAN ==="
-cp -v "$SCRIPT_DIR/modules/vlan/"*.ko "$MODDIR/" 2>/dev/null || echo "No VLAN modules"
+          echo "=== Installing VLAN ==="
+          cp -v "$SCRIPT_DIR/modules/vlan/"*.ko "$MODDIR/" 2>/dev/null || echo "No VLAN modules"
 
-depmod -a "$KVER"
+          depmod -a "$KVER"
 
-echo ""
-echo "=== Loading test ==="
+          echo ""
+          echo "=== Loading test ==="
 
-# WireGuard dependencies first
-for mod in libchacha20poly1305 libcurve25519-generic curve25519-x86_64 udp_tunnel; do
-  modprobe "$mod" 2>/dev/null && echo "  $mod: OK" || echo "  $mod: FAIL (may be builtin)"
-done
+          # WireGuard dependencies first
+          for mod in libchacha20poly1305 libcurve25519-generic curve25519-x86_64 udp_tunnel; do
+            modprobe "$mod" 2>/dev/null && echo "  $mod: OK" || echo "  $mod: FAIL (may be builtin)"
+          done
 
-# WireGuard
-modprobe wireguard 2>/dev/null && echo "  wireguard: OK" || echo "  wireguard: FAIL"
+          # WireGuard
+          modprobe wireguard 2>/dev/null && echo "  wireguard: OK" || echo "  wireguard: FAIL"
 
-# VLAN (vlan_core must load first, modprobe handles dependency)
-modprobe vlan_core 2>/dev/null && echo "  vlan_core: OK" || echo "  vlan_core: FAIL"
-modprobe 8021q 2>/dev/null && echo "  8021q: OK" || echo "  8021q: FAIL"
+          # VLAN (vlan_core must load first, modprobe handles dependency)
+          modprobe vlan_core 2>/dev/null && echo "  vlan_core: OK" || echo "  vlan_core: FAIL"
+          modprobe 8021q 2>/dev/null && echo "  8021q: OK" || echo "  8021q: FAIL"
 
-echo ""
-echo "=== All modules installed ==="
-INSTALLEOF
+          echo ""
+          echo "=== All modules installed ==="
+          EOF
+          # Strip leading spaces from heredoc (YAML | block requires indentation
+          # but bash heredoc preserves them, breaking the shebang)
+          sed -i 's/^          //' output/install_on_edison.sh
           chmod +x output/install_on_edison.sh
 
       - name: Upload general drivers
