@@ -255,7 +255,7 @@ jobs:
 
       - name: Create install script
         run: |
-          cat > output/install_on_edison.sh << 'INSTALL_EOF'
+          cat > output/install_on_edison.sh << 'EOF'
           #!/bin/bash
           set -e
           KVER="6.12.3-edison-acpi-preempt-rt"
@@ -297,7 +297,7 @@ jobs:
 
           echo ""
           echo "=== All modules installed ==="
-          INSTALL_EOF
+          EOF
           chmod +x output/install_on_edison.sh
 
       - name: Upload general drivers
