@@ -255,7 +255,7 @@ jobs:
 
       - name: Create install script
         run: |
-          touch output/install_on_edison.sh
+          cd ~/linux-source
           cat > output/install_on_edison.sh << 'EOF'
           #!/bin/bash
           set -e
@@ -305,5 +305,5 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: general-drivers-v6.12.3
-          path: output/
+          path: linux-source/output/
           retention-days: 30
