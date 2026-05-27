@@ -28,15 +28,40 @@ jobs:
           sparse-checkout: |
             meta-intel-edison-bsp/recipes-kernel/linux/files
 
-      - name: Cache linux source
+      # Cache hit strategy: cache the entire built kernel tree
+      # Key includes workflow file hash so changes to this file invalidate cache
+      - name: Cache kernel build (source + compiled objects)
         uses: actions/cache@v4
-        id: cache-linux
+        id: cache-kernel-build
         with:
           path: ~/linux-source
-          key: linux-v6.12.3-drm-tinydrm-v1
+          key: linux-build-v6.12.3-drm-tinydrm-v1-${{ hashFiles('.github/workflows/build-drm-tinydrm.yml') }}
+          restore-keys: |
+            linux-build-v6.12.3-drm-tinydrm-v1-
 
-      - name: Clone Linux kernel source
-        if: steps.cache-linux.outputs.cache-hit != 'true'
+      # Fix: ubuntu-latest (24.04) upgraded to GCC-14, struct module size became 0x1640
+      # Edison uses GCC 13.3.0 (poky), must pin GCC-13 for matching 0x4c0
+      - name: Install dependencies and pin GCC-13
+        if: steps.cache-kernel-build.outputs.cache-hit != 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y flex bison libelf-dev libssl-dev gcc-13
+          # Pin GCC-13 as default compiler (matches Edison poky GCC 13.3.0)
+          sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-13 100
+          sudo update-alternatives --install /usr/bin/cc cc /usr/bin/gcc-13 100
+          gcc --version
+
+      - name: Install dependencies (cache hit - minimal)
+        if: steps.cache-kernel-build.outputs.cache-hit == 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-13
+          sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-13 100
+          sudo update-alternatives --install /usr/bin/cc cc /usr/bin/gcc-13 100
+          gcc --version
+
+      - name: Build kernel (clone + config + make)
+        if: steps.cache-kernel-build.outputs.cache-hit != 'true'
         run: |
           rm -rf ~/linux-source
           git clone --depth 1 --branch v6.12.3 \
@@ -46,16 +71,14 @@ jobs:
             https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git \
             ~/linux-source
 
-      - name: Install dependencies
-        run: sudo apt-get update && sudo apt-get install -y flex bison libelf-dev libssl-dev
-
-      - name: Prepare kernel config (matching Edison exactly)
-        run: |
           cd ~/linux-source
           CFG_DIR="$GITHUB_WORKSPACE/upstream-edison/meta-intel-edison-bsp/recipes-kernel/linux/files"
 
           echo "=== .cfg files count ==="
           ls "$CFG_DIR"/*.cfg 2>/dev/null | wc -l
+
+          echo "=== GCC version ==="
+          gcc --version
 
           make defconfig
 
@@ -75,7 +98,7 @@ jobs:
             0009-disable-i915-DRM.cfg \
             0010-enable-X86_INTEL_MID.cfg \
             0011-enable-INPUT_SOC_BUTTON_ARRAY.cfg \
-            0012-enable-I2C-HID-and-HID_MULTITOUCH.cfg \
+            0012-enable-I2C_HID-and-HID_MULTITOUCH.cfg \
             0013-DEBUG_SHIRQ-DEBUG_LOCKDEP.cfg \
             0014-enable-ACPI_DEBUG-and-ACPI_PROCFS_POWER.cfg \
             0015-enable-ACPI_TABLE_UPGRADE.cfg \
@@ -162,15 +185,17 @@ jobs:
           echo "=== Auto-selected dependency checks ==="
           grep -E 'CONFIG_DRM_KMS_HELPER|CONFIG_DRM_GEM_DMA_HELPER|CONFIG_DRM_MIPI_DBI|CONFIG_BACKLIGHT_CLASS_DEVICE' .config
 
-      - name: Build full kernel + modules
-        run: |
-          cd ~/linux-source
+          echo "=== Building full kernel ==="
           make -j$(nproc) 2>&1 | tail -10
 
-      - name: Verify and collect DRM modules
+      - name: Verify and collect DRM module
         run: |
           cd ~/linux-source
 
+          echo "=== GCC version used ==="
+          gcc --version
+
+          echo ""
           echo "=== Collecting .ko files ==="
           KOS="
             drivers/gpu/drm/tiny/hx8357d.ko
@@ -186,24 +211,26 @@ jobs:
           done
 
           echo ""
-          echo "=== vermagic check ==="
+          echo "=== vermagic check (must contain preempt_rt and mod_unload) ==="
+          EXPECTED_VERMAGIC="6.12.3-edison-acpi-preempt-rt SMP preempt_rt mod_unload"
           for ko in $KOS; do
             VER=$(modinfo "$ko" 2>/dev/null | grep vermagic)
             echo "  $ko: $VER"
-            if ! echo "$VER" | grep -q "preempt_rt"; then
-              echo "  ERROR: vermagic missing preempt_rt!"
+            if ! echo "$VER" | grep -qF "$EXPECTED_VERMAGIC"; then
+              echo "  ERROR: vermagic mismatch! Expected substring: $EXPECTED_VERMAGIC"
               exit 1
             fi
           done
 
           echo ""
-          echo "=== struct module size check (must be 0x4c0) ==="
+          echo "=== struct module size check (must be 0x4c0 with GCC-13) ==="
           for ko in $KOS; do
             MOD_SIZE=$(readelf -SW "$ko" | grep -A1 -E '\.gnu\.linkonce\.this_module PROGBITS|\.gnu\.linkonce\.this_module$' | grep -v rela | head -2 | tr '\n' ' ' | awk '{for(i=1;i<=NF;i++) if($i=="PROGBITS"){print $(i+2);break}}')
             MOD_SIZE_NORM=$(printf '%x' "0x$MOD_SIZE")
             echo "  $ko this_module_size=0x$MOD_SIZE_NORM"
             if [ "0x$MOD_SIZE_NORM" != "0x4c0" ]; then
               echo "  ERROR: struct module size mismatch! Expected 0x4c0, got 0x$MOD_SIZE_NORM"
+              echo "  This usually means GCC version != 13.x. Check GCC pinning above."
               exit 1
             fi
           done
@@ -214,7 +241,7 @@ jobs:
             echo "  $ko ($(du -h "$ko" | cut -f1))"
           done
 
-      - name: Package modules
+      - name: Package module
         run: |
           mkdir -p output/modules
           cp ~/linux-source/drivers/gpu/drm/tiny/hx8357d.ko output/modules/
