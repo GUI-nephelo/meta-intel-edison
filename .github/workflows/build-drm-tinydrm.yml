@@ -199,12 +199,11 @@ jobs:
           echo ""
           echo "=== struct module size check (must be 0x4c0) ==="
           for ko in $KOS; do
-            MOD_SIZE=$(readelf -SW "$ko" | grep '.gnu.linkonce.this_module' | awk '{print $6}')
-            # Normalize: strip leading zeros (readelf outputs e.g. "0004c0", not "4c0")
+            MOD_SIZE=$(readelf -SW "$ko" | grep -A1 -E '\.gnu\.linkonce\.this_module PROGBITS|\.gnu\.linkonce\.this_module$' | grep -v rela | head -2 | tr '\n' ' ' | awk '{for(i=1;i<=NF;i++) if($i=="PROGBITS"){print $(i+2);break}}')
             MOD_SIZE_NORM=$(printf '%x' "0x$MOD_SIZE")
             echo "  $ko this_module_size=0x$MOD_SIZE_NORM"
             if [ "0x$MOD_SIZE_NORM" != "0x4c0" ]; then
-              echo "  ERROR: struct module size mismatch! Expected 0x4c0, got 0x$MOD_SIZE_NORM (raw: 0x$MOD_SIZE)"
+              echo "  ERROR: struct module size mismatch! Expected 0x4c0, got 0x$MOD_SIZE_NORM"
               exit 1
             fi
           done
