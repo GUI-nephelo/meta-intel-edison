@@ -1,0 +1,283 @@
+name: Build DRM TINYDRM Panel Drivers (hx8357d + ili9486) for Intel Edison
+
+on:
+  push:
+    branches: [build/drm-tinydrm]
+    paths:
+      - '.github/workflows/build-drm-tinydrm.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout meta-intel-edison (our fork)
+        uses: actions/checkout@v4
+
+      - name: Checkout upstream meta-intel-edison for .cfg files
+        uses: actions/checkout@v4
+        with:
+          repository: edison-fw/meta-intel-edison
+          ref: master
+          path: upstream-edison
+          sparse-checkout: |
+            meta-intel-edison-bsp/recipes-kernel/linux/files
+
+      - name: Cache linux source
+        uses: actions/cache@v4
+        id: cache-linux
+        with:
+          path: ~/linux-source
+          key: linux-v6.12.3-drm-tinydrm-v1
+
+      - name: Clone Linux kernel source
+        if: steps.cache-linux.outputs.cache-hit != 'true'
+        run: |
+          rm -rf ~/linux-source
+          git clone --depth 1 --branch v6.12.3 \
+            https://github.com/gregkh/linux.git \
+            ~/linux-source || \
+          git clone --depth 1 --branch v6.12.3 \
+            https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git \
+            ~/linux-source
+
+      - name: Install dependencies
+        run: sudo apt-get update && sudo apt-get install -y flex bison libelf-dev libssl-dev
+
+      - name: Prepare kernel config (matching Edison exactly)
+        run: |
+          cd ~/linux-source
+          CFG_DIR="$GITHUB_WORKSPACE/upstream-edison/meta-intel-edison-bsp/recipes-kernel/linux/files"
+
+          echo "=== .cfg files count ==="
+          ls "$CFG_DIR"/*.cfg 2>/dev/null | wc -l
+
+          make defconfig
+
+          # Concatenate all .cfg fragments into one file, then merge
+          MERGE_CFG=/tmp/edison-all.cfg
+          cat /dev/null > $MERGE_CFG
+
+          for cfg in \
+            0001-enable-to-build-a-netboot-image.cfg \
+            0002-enable-x2APIC.cfg \
+            0003-enable-NETCONSOLE_DYNAMIC.cfg \
+            0004-enable-STMMAC.cfg \
+            0005-enable-IGB.cfg \
+            0006-enable-IXGBE.cfg \
+            0007-enable-USB_RTL8152.cfg \
+            0008-disable-HPET.cfg \
+            0009-disable-i915-DRM.cfg \
+            0010-enable-X86_INTEL_MID.cfg \
+            0011-enable-INPUT_SOC_BUTTON_ARRAY.cfg \
+            0012-enable-I2C_HID-and-HID_MULTITOUCH.cfg \
+            0013-DEBUG_SHIRQ-DEBUG_LOCKDEP.cfg \
+            0014-enable-ACPI_DEBUG-and-ACPI_PROCFS_POWER.cfg \
+            0015-enable-ACPI_TABLE_UPGRADE.cfg \
+            0016-enable-X86_INTEL_LPSS-and-LPSS-drivers.cfg \
+            0017-enable-MFD_INTEL_LPSS-drivers.cfg \
+            0018-enable-INTEL_IDMA64-iDMA-64-bit.cfg \
+            0020-enable-SPI_DW.cfg \
+            0021-disable-HDA-audio.cfg \
+            0022-enable-Intel-Quark-devices.cfg \
+            0023-enable-DEBUG_GPIO.cfg \
+            0024-enable-GPIO_DWAPB.cfg \
+            0025-enable-GPIO_PCA953X.cfg \
+            0029-enable-INTEL_IDLE.cfg \
+            0030-enable-PUNIT_ATOM_DEBUG.cfg \
+            0031-enable-REGULATOR.cfg \
+            0032-enable-BRCMFMAC.cfg \
+            0033-enable-BT_HCIUART_BCM.cfg \
+            0034-enable-ADS7950.cfg \
+            0035-enable-ACPI_CONFIGFS.cfg \
+            0036-enable-SND_SST_ATOM_HIFI2_PLATFORM.cfg \
+            0037-enable-SND_SOC_SOF-nocodec.cfg \
+            0038-enable-PHY_TUSB1210.cfg \
+            0039-enable-USB_CONFIGFS.cfg \
+            0040-enable-INTEL_MRFLD_ADC.cfg \
+            0041-enable-EXTCON_INTEL_MRFLD.cfg \
+            0042-disable-LOCALVERSION_AUTO.cfg \
+            preempt.cfg \
+            ftdi_sio.cfg ch341.cfg smsc95xx.cfg bt_more.cfg \
+            i2c_chardev.cfg configfs.cfg bridge.cfg leds.cfg bpf.cfg \
+            btrfs.cfg sof_nocodec.cfg audio.cfg tun.cfg iio.cfg \
+            cdc_eem.cfg namespaces.cfg; do
+            if [ -f "$CFG_DIR/$cfg" ]; then
+              cat "$CFG_DIR/$cfg" >> $MERGE_CFG
+              echo "" >> $MERGE_CFG
+            else
+              echo "WARNING: $cfg not found"
+            fi
+          done
+
+          echo "=== Merged config fragment lines ==="
+          wc -l $MERGE_CFG
+
+          # Merge all fragments at once
+          scripts/kconfig/merge_config.sh -m .config $MERGE_CFG 2>&1 | tail -30
+
+          # Verify DRM core is enabled (required for TINYDRM drivers)
+          echo "=== DRM core status ==="
+          if ! grep -q 'CONFIG_DRM=[ym]' .config; then
+            echo "WARNING: CONFIG_DRM not set, enabling..."
+            scripts/config --enable CONFIG_DRM
+          fi
+          grep 'CONFIG_DRM=' .config
+
+          # Verify SPI is enabled (required for TINYDRM SPI panel drivers)
+          if ! grep -q 'CONFIG_SPI=y' .config; then
+            echo "WARNING: CONFIG_SPI not set, enabling..."
+            scripts/config --enable CONFIG_SPI
+          fi
+
+          # Enable TINYDRM panel drivers as modules
+          scripts/config --module CONFIG_TINYDRM_HX8357D
+          scripts/config --module CONFIG_TINYDRM_ILI9486
+
+          # Ensure vermagic matches exactly
+          scripts/config --set-str CONFIG_LOCALVERSION "-edison-acpi-preempt-rt"
+          scripts/config --disable CONFIG_LOCALVERSION_AUTO
+
+          yes '' | make oldconfig 2>&1 | tail -10
+
+          echo "=== Key configs ==="
+          grep -E 'CONFIG_DRM[=_]|CONFIG_TINYDRM|CONFIG_SPI=|CONFIG_PREEMPT_RT=|CONFIG_LOCALVERSION=|CONFIG_LOCALVERSION_AUTO=' .config
+
+          # Fatal check: TINYDRM drivers must be =m (not silently dropped to =n)
+          if ! grep -q 'CONFIG_TINYDRM_HX8357D=m' .config; then
+            echo "FATAL: TINYDRM_HX8357D not =m (silently dropped - check DRM/SPI dependencies)"
+            grep -E 'CONFIG_DRM=|CONFIG_SPI=' .config
+            exit 1
+          fi
+          if ! grep -q 'CONFIG_TINYDRM_ILI9486=m' .config; then
+            echo "FATAL: TINYDRM_ILI9486 not =m"
+            exit 1
+          fi
+
+          echo "=== Auto-selected dependency checks ==="
+          grep -E 'CONFIG_DRM_KMS_HELPER|CONFIG_DRM_GEM_DMA_HELPER|CONFIG_DRM_MIPI_DBI|CONFIG_BACKLIGHT_CLASS_DEVICE' .config
+
+      - name: Build full kernel + modules
+        run: |
+          cd ~/linux-source
+          make -j$(nproc) 2>&1 | tail -10
+
+      - name: Verify and collect DRM modules
+        run: |
+          cd ~/linux-source
+
+          echo "=== Collecting .ko files ==="
+          KOS="
+            drivers/gpu/drm/tiny/hx8357d.ko
+            drivers/gpu/drm/tiny/ili9486.ko
+          "
+
+          for ko in $KOS; do
+            if [ ! -f "$ko" ]; then
+              echo "FATAL: $ko not found"
+              exit 1
+            fi
+            echo "  FOUND: $ko"
+          done
+
+          echo ""
+          echo "=== vermagic check ==="
+          for ko in $KOS; do
+            VER=$(modinfo "$ko" 2>/dev/null | grep vermagic)
+            echo "  $ko: $VER"
+            if ! echo "$VER" | grep -q "preempt_rt"; then
+              echo "  ERROR: vermagic missing preempt_rt!"
+              exit 1
+            fi
+          done
+
+          echo ""
+          echo "=== struct module size check (must be 0x4c0) ==="
+          for ko in $KOS; do
+            MOD_SIZE=$(readelf -SW "$ko" | grep '.gnu.linkonce.this_module' | awk '{print $6}')
+            echo "  $ko this_module_size=0x$MOD_SIZE"
+            if [ "0x$MOD_SIZE" != "0x4c0" ]; then
+              echo "  ERROR: struct module size mismatch! Expected 0x4c0, got 0x$MOD_SIZE"
+              exit 1
+            fi
+          done
+
+          echo ""
+          echo "=== Additional DRM dependency modules (if built as .ko) ==="
+          find drivers/gpu/drm -name "*.ko" -type f | while read ko; do
+            echo "  $ko ($(du -h "$ko" | cut -f1))"
+          done
+
+      - name: Package modules
+        run: |
+          mkdir -p output/modules
+          cp ~/linux-source/drivers/gpu/drm/tiny/hx8357d.ko output/modules/
+          cp ~/linux-source/drivers/gpu/drm/tiny/ili9486.ko output/modules/
+
+          # Also collect DRM dependency modules if they were built as .ko (not built-in)
+          for dep_ko in \
+            drivers/gpu/drm/drm_kms_helper.ko \
+            drivers/gpu/drm/drm_mipi_dbi.ko \
+            drivers/gpu/drm/drm_gem_dma_helper.ko \
+            drivers/video/backlight/backlight.ko; do
+            if [ -f ~/linux-source/$dep_ko ]; then
+              cp ~/linux-source/$dep_ko output/modules/
+              echo "  Packaged dependency: $dep_ko"
+            fi
+          done
+
+          ls -la output/modules/
+
+      - name: Create install script
+        run: |
+          cat > output/install_on_edison.sh << 'INSTALLSCRIPT'
+          #!/bin/bash
+          set -e
+          KVER="6.12.3-edison-acpi-preempt-rt"
+          SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+          MODDIR="/lib/modules/$KVER/extra"
+
+          echo "=== Installing DRM panel drivers ==="
+          mkdir -p "$MODDIR"
+          cp -v "$SCRIPT_DIR/modules/"*.ko "$MODDIR/"
+          depmod -a "$KVER"
+
+          echo ""
+          echo "=== Loading modules ==="
+          # Load dependency modules first (if they exist as .ko)
+          for dep in drm_kms_helper drm_mipi_dbi drm_gem_dma_helper backlight; do
+            if [ -f "$MODDIR/${dep}.ko" ]; then
+              echo "  modprobe $dep"
+              modprobe "$dep" 2>/dev/null || insmod "$MODDIR/${dep}.ko"
+            fi
+          done
+
+          # Try modprobe first (handles dependencies), fall back to insmod
+          echo "  modprobe hx8357d"
+          modprobe hx8357d 2>/dev/null || insmod "$MODDIR/hx8357d.ko"
+
+          echo "  modprobe ili9486"
+          modprobe ili9486 2>/dev/null || insmod "$MODDIR/ili9486.ko"
+
+          echo ""
+          echo "=== Verification ==="
+          lsmod | grep -E 'hx8357d|ili9486|drm'
+          echo ""
+          echo "=== DRM device nodes ==="
+          ls -la /dev/dri/ 2>/dev/null || echo "  (no /dev/dri/ yet - needs device tree binding)"
+          echo ""
+          echo "=== DRM panel drivers installed successfully ==="
+          INSTALLSCRIPT
+          chmod +x output/install_on_edison.sh
+
+      - name: Upload DRM TINYDRM drivers
+        uses: actions/upload-artifact@v4
+        with:
+          name: drm-tinydrm-modules-v6.12.3
+          path: output/
+          retention-days: 30
