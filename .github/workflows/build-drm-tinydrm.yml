@@ -102,7 +102,7 @@ jobs:
         id: cache-build
         with:
           path: ~/linux-source
-          key: linux-build-v${{ env.KERNEL_VERSION }}-drm-tinydrm-v1
+          key: linux-build-v${{ env.KERNEL_VERSION }}-drm-tinydrm-v2
 
       - name: Install build dependencies
         if: steps.cache-build.outputs.cache-hit != 'true'
@@ -223,7 +223,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/linux-source
-          key: linux-build-v${{ env.KERNEL_VERSION }}-drm-tinydrm-v1
+          key: linux-build-v${{ env.KERNEL_VERSION }}-drm-tinydrm-v2
 
       - name: Install verification tools
         run: sudo apt-get update && sudo apt-get install -y binutils kmod
@@ -283,13 +283,21 @@ jobs:
           for dep_ko in \
             drivers/gpu/drm/drm_kms_helper.ko \
             drivers/gpu/drm/drm_mipi_dbi.ko \
-            drivers/gpu/drm/drm_gem_dma_helper.ko \
+            drivers/gpu/drm/drm_dma_helper.ko \
+            drivers/gpu/drm/drm_panel.ko \
             drivers/video/backlight/backlight.ko; do
             if [ -f ~/linux-source/$dep_ko ]; then
               cp ~/linux-source/$dep_ko output/modules/
               echo "  Packaged dependency: $dep_ko"
             fi
           done
+
+          echo ""
+          echo "=== All DRM .ko files in build tree ==="
+          find ~/linux-source/drivers/gpu/drm -name "*.ko" -type f 2>/dev/null
+          echo ""
+          echo "=== All backlight .ko files in build tree ==="
+          find ~/linux-source/drivers/video/backlight -name "*.ko" -type f 2>/dev/null
 
           ls -la output/modules/
 
@@ -309,7 +317,7 @@ jobs:
 
           echo ""
           echo "=== Loading modules ==="
-          for dep in drm_kms_helper drm_mipi_dbi drm_gem_dma_helper backlight; do
+          for dep in drm_kms_helper drm_mipi_dbi drm_dma_helper drm_panel backlight; do
             if [ -f "$MODDIR/${dep}.ko" ]; then
               echo "  modprobe $dep"
               modprobe "$dep" 2>/dev/null || insmod "$MODDIR/${dep}.ko"
