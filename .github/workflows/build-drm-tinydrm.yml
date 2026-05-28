@@ -6,6 +6,15 @@ on:
     paths:
       - '.github/workflows/build-drm-tinydrm.yml'
   workflow_dispatch:
+    inputs:
+      start_from:
+        description: 'Start pipeline from stage (setup=full run, build=skip setup, verify=skip setup+build)'
+        type: choice
+        options:
+          - setup
+          - build
+          - verify
+        default: setup
 
 permissions:
   contents: read
@@ -20,6 +29,7 @@ jobs:
   # Stage 1: Environment Setup (deterministic, cached)
   # ============================================================
   setup-environment:
+    if: ${{ github.event_name == 'push' || inputs.start_from == 'setup' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     outputs:
@@ -74,6 +84,7 @@ jobs:
   # ============================================================
   build-kernel:
     needs: setup-environment
+    if: ${{ always() && (github.event_name == 'push' || inputs.start_from == 'setup' || inputs.start_from == 'build') }}
     runs-on: ubuntu-24.04
     timeout-minutes: 90
     outputs:
@@ -218,6 +229,7 @@ jobs:
   # ============================================================
   verify-and-package:
     needs: build-kernel
+    if: ${{ always() }}
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
