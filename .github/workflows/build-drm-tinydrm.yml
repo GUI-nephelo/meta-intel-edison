@@ -102,7 +102,7 @@ jobs:
         id: cache-build
         with:
           path: ~/linux-source
-          key: linux-build-v${{ env.KERNEL_VERSION }}-drm-tinydrm-v2
+          key: linux-build-v${{ env.KERNEL_VERSION }}-drm-tinydrm-v3
 
       - name: Install build dependencies
         if: steps.cache-build.outputs.cache-hit != 'true'
@@ -185,6 +185,8 @@ jobs:
             scripts/config --enable CONFIG_SPI
           fi
 
+          scripts/config --module CONFIG_DRM_GEM_DMA_HELPER
+          scripts/config --module CONFIG_BACKLIGHT_CLASS_DEVICE
           scripts/config --module CONFIG_TINYDRM_HX8357D
           scripts/config --module CONFIG_TINYDRM_ILI9486
           scripts/config --set-str CONFIG_LOCALVERSION "${{ env.KERNEL_LOCALVERSION }}"
@@ -193,7 +195,7 @@ jobs:
           yes '' | make oldconfig 2>&1 | tail -10
 
           echo "=== Key configs ==="
-          grep -E 'CONFIG_DRM[=_]|CONFIG_TINYDRM|CONFIG_SPI=|CONFIG_PREEMPT_RT=|CONFIG_LOCALVERSION' .config
+          grep -E 'CONFIG_DRM[=_]|CONFIG_TINYDRM|CONFIG_SPI=|CONFIG_PREEMPT_RT=|CONFIG_LOCALVERSION|CONFIG_BACKLIGHT_CLASS|CONFIG_DRM_GEM_DMA' .config
 
           if ! grep -q 'CONFIG_TINYDRM_HX8357D=m' .config; then
             echo "FATAL: TINYDRM_HX8357D not =m"
@@ -223,7 +225,7 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/linux-source
-          key: linux-build-v${{ env.KERNEL_VERSION }}-drm-tinydrm-v2
+          key: linux-build-v${{ env.KERNEL_VERSION }}-drm-tinydrm-v3
 
       - name: Install verification tools
         run: sudo apt-get update && sudo apt-get install -y binutils kmod
@@ -289,6 +291,8 @@ jobs:
             if [ -f ~/linux-source/$dep_ko ]; then
               cp ~/linux-source/$dep_ko output/modules/
               echo "  Packaged dependency: $dep_ko"
+            else
+              echo "  SKIP (not found or built-in): $dep_ko"
             fi
           done
 
