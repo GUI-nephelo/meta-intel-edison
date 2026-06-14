@@ -243,15 +243,25 @@ jobs:
 
           static struct spi_device *spi_dev;
 
+          static int match_bus5(struct device *dev, void *data)
+          {
+              struct spi_device *spi = to_spi_device(dev);
+              return spi->controller && spi->controller->bus_num == 5;
+          }
+
           static int __init spidev_spi5_init(void)
           {
+              struct device *dev;
               struct spi_controller *ctlr;
 
-              ctlr = spi_busnum_to_controller(5);
-              if (!ctlr) {
+              dev = bus_find_device(&spi_bus_type, NULL, NULL, match_bus5);
+              if (!dev) {
                   pr_err("spidev_spi5: cannot find SPI bus 5\n");
                   return -ENODEV;
               }
+
+              ctlr = to_spi_device(dev)->controller;
+              put_device(dev);
 
               spi_dev = spi_new_device(ctlr, &spidev_info);
               if (!spi_dev) {
