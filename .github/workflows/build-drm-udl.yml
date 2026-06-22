@@ -6,15 +6,6 @@ on:
     paths:
       - '.github/workflows/build-drm-udl.yml'
   workflow_dispatch:
-    inputs:
-      start_from:
-        description: 'Start pipeline from stage (setup=full run, build=skip setup, verify=skip setup+build)'
-        type: choice
-        options:
-          - setup
-          - build
-          - verify
-        default: setup
 
 permissions:
   contents: read
@@ -23,21 +14,13 @@ env:
   KERNEL_VERSION: "6.12.3"
   KERNEL_LOCALVERSION: "-edison-acpi-preempt-rt"
   EDISON_VERMAGIC: "6.12.3-edison-acpi-preempt-rt SMP preempt_rt mod_unload"
-  # ===== 驱动特异配置 =====
   DRIVER_NAME: "drm-udl"
-  CACHE_SUFFIX: "drm-udl"
   ARTIFACT_NAME: "drm-udl-modules-v6.12.3"
 
 jobs:
-  # ============================================================
-  # Stage 1: Environment Setup
-  # ============================================================
-  setup-environment:
-    if: ${{ github.event_name == 'push' || inputs.start_from == 'setup' }}
+  build-and-package:
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
-    outputs:
-      cache-key: ${{ steps.env-info.outputs.cache-key }}
+    timeout-minutes: 90
     steps:
       - uses: actions/checkout@v4
 
@@ -57,61 +40,6 @@ jobs:
           path: ~/linux-source
           key: linux-src-v${{ env.KERNEL_VERSION }}-v1
 
-      - name: Clone kernel source
-        if: steps.cache-source.outputs.cache-hit != 'true'
-        run: |
-          rm -rf ~/linux-source
-          # GitHub 镜像优先（更可靠），kernel.org 备用
-          git clone --depth 1 --branch v${{ env.KERNEL_VERSION }} \
-            https://github.com/gregkh/linux.git \
-            ~/linux-source || \
-          git clone --depth 1 --branch v${{ env.KERNEL_VERSION }} \
-            https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git \
-            ~/linux-source
-
-      - name: Install build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y flex bison libelf-dev libssl-dev
-
-      - name: Print environment info
-        id: env-info
-        run: |
-          echo "=== Environment ==="
-          echo "OS: $(lsb_release -ds 2>/dev/null || cat /etc/os-release | grep PRETTY_NAME)"
-          echo "GCC: $(gcc --version | head -1)"
-          echo "Kernel: ${{ env.KERNEL_VERSION }}"
-          echo "cache-key=linux-src-v${{ env.KERNEL_VERSION }}-v1" >> $GITHUB_OUTPUT
-
-  # ============================================================
-  # Stage 2: Kernel Build (config + compile)
-  # ============================================================
-  build-kernel:
-    needs: setup-environment
-    if: ${{ always() && (github.event_name == 'push' || inputs.start_from == 'setup' || inputs.start_from == 'build') }}
-    runs-on: ubuntu-24.04
-    timeout-minutes: 90
-    outputs:
-      build-cache-hit: ${{ steps.cache-build.outputs.cache-hit }}
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Checkout upstream .cfg files
-        uses: actions/checkout@v4
-        with:
-          repository: edison-fw/meta-intel-edison
-          ref: master
-          path: upstream-edison
-          sparse-checkout: |
-            meta-intel-edison-bsp/recipes-kernel/linux/files
-
-      - name: Restore kernel source
-        uses: actions/cache@v4
-        id: cache-source
-        with:
-          path: ~/linux-source
-          key: linux-src-v${{ env.KERNEL_VERSION }}-v1
-
       - name: Clone kernel source if cache miss
         if: steps.cache-source.outputs.cache-hit != 'true'
         run: |
@@ -123,21 +51,12 @@ jobs:
             https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git \
             ~/linux-source
 
-      - name: Cache built kernel
-        uses: actions/cache@v4
-        id: cache-build
-        with:
-          path: ~/linux-source
-          key: linux-build-v${{ env.KERNEL_VERSION }}-${{ env.CACHE_SUFFIX }}-v1
-
       - name: Install build dependencies
-        if: steps.cache-build.outputs.cache-hit != 'true'
         run: |
           sudo apt-get update
-          sudo apt-get install -y flex bison libelf-dev libssl-dev
+          sudo apt-get install -y flex bison libelf-dev libssl-dev binutils kmod
 
       - name: Configure and build kernel
-        if: steps.cache-build.outputs.cache-hit != 'true'
         run: |
           cd ~/linux-source
           CFG_DIR="$GITHUB_WORKSPACE/upstream-edison/meta-intel-edison-bsp/recipes-kernel/linux/files"
@@ -204,10 +123,8 @@ jobs:
 
           scripts/kconfig/merge_config.sh -m .config $MERGE_CFG 2>&1 | tail -30
 
-          # ===== DRM_UDL 驱动 CONFIG =====
-          # 启用 DisplayLink USB 2.0 KMS 驱动
+          # ===== DRM_UDL driver CONFIG =====
           scripts/config --module CONFIG_DRM_UDL
-          # 依赖（Edison 内核已内置，但编译时需要 CONFIG 启用以编译 udl.ko）：
           scripts/config --enable CONFIG_DRM
           scripts/config --enable CONFIG_USB
           scripts/config --enable CONFIG_DRM_KMS_HELPER
@@ -221,7 +138,6 @@ jobs:
           echo "=== Key configs ==="
           grep -E 'CONFIG_PREEMPT_RT=|CONFIG_LOCALVERSION=|CONFIG_DRM_UDL=' .config
 
-          # ===== 驱动 CONFIG 验证 =====
           if ! grep -q 'CONFIG_DRM_UDL=m' .config; then
             echo "FATAL: CONFIG_DRM_UDL not =m"
             exit 1
@@ -230,35 +146,10 @@ jobs:
           echo "=== Building kernel ($(nproc) jobs) ==="
           make -j$(nproc) 2>&1 | tail -10
 
-      - name: Build summary
-        if: steps.cache-build.outputs.cache-hit == 'true'
-        run: echo "Cache hit - skipped kernel build"
-
-  # ============================================================
-  # Stage 3: Verify + Package
-  # ============================================================
-  verify-and-package:
-    needs: build-kernel
-    if: ${{ always() }}
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
-    steps:
-      - name: Restore built kernel
-        uses: actions/cache@v4
-        with:
-          path: ~/linux-source
-          key: linux-build-v${{ env.KERNEL_VERSION }}-${{ env.CACHE_SUFFIX }}-v1
-
-      - name: Install verification tools
-        run: sudo apt-get update && sudo apt-get install -y binutils kmod
-
       - name: Verify modules
         run: |
           cd ~/linux-source
 
-          # ===== DRM_UDL 目标 .ko 列表 =====
-          # udl 的所有依赖（drm/usb/drm_kms_helper/drm_shmem_helper）在 Edison 内核都是 built-in
-          # 所以只需打包 udl.ko 单文件
           KOS="
             drivers/gpu/drm/udl/udl.ko
           "
@@ -296,7 +187,7 @@ jobs:
           done
 
           echo ""
-          echo "=== 4. modinfo depends check ==="
+          echo "=== 4. modinfo depends ==="
           for ko in $KOS; do
             echo "--- modinfo $ko ---"
             modinfo "$ko" 2>&1
@@ -308,10 +199,7 @@ jobs:
       - name: Package modules
         run: |
           mkdir -p output/modules
-
-          # ===== DRM_UDL：单文件复制（依赖均为 built-in） =====
           cp ~/linux-source/drivers/gpu/drm/udl/udl.ko output/modules/
-
           ls -la output/modules/
 
       - name: Create install script
@@ -330,8 +218,6 @@ jobs:
 
           echo ""
           echo "=== Loading udl module ==="
-          # 所有依赖（drm, usbcore, drm_kms_helper, drm_shmem_helper）已 built-in
-          # 直接加载 udl 即可
           modprobe udl 2>/dev/null || insmod "$MODDIR/udl.ko"
 
           echo ""
