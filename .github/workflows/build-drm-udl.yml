@@ -112,6 +112,17 @@ jobs:
           path: ~/linux-source
           key: linux-src-v${{ env.KERNEL_VERSION }}-v1
 
+      - name: Clone kernel source if cache miss
+        if: steps.cache-source.outputs.cache-hit != 'true'
+        run: |
+          rm -rf ~/linux-source
+          git clone --depth 1 --branch v${{ env.KERNEL_VERSION }} \
+            https://github.com/gregkh/linux.git \
+            ~/linux-source || \
+          git clone --depth 1 --branch v${{ env.KERNEL_VERSION }} \
+            https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git \
+            ~/linux-source
+
       - name: Cache built kernel
         uses: actions/cache@v4
         id: cache-build
